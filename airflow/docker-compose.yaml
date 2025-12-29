@@ -1,0 +1,124 @@
+version: "3.8"
+
+# -------------------------------------------------
+# Common Airflow configuration
+# -------------------------------------------------
+x-airflow-common: &airflow-common
+  image: apache/airflow:2.9.1
+
+  # Load environment variables (Snowflake, Slack, etc.)
+  env_file:
+    - .env
+
+  environment:
+    # -----------------------------
+    # Airflow core configuration
+    # -----------------------------
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth
+
+    # -----------------------------
+    # Force Postgres (NO SQLite)
+    # -----------------------------
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    _PIP_ADDITIONAL_REQUIREMENTS: "-r /opt/airflow/requirements.txt"
+
+    # -----------------------------
+    # Explicitly pass Snowflake vars
+    # (prevents env issues in tasks)
+    # -----------------------------
+    SNOW_USER: ${SNOW_USER}
+    SNOW_PWD: ${SNOW_PWD}
+    SNOW_ACCOUNT: ${SNOW_ACCOUNT}
+    SNOW_DATABASE: ${SNOW_DATABASE}
+    SNOW_SCHEMA: ${SNOW_SCHEMA}
+    SNOW_WAREHOUSE: ${SNOW_WAREHOUSE}
+    SNOW_ROLE: ${SNOW_ROLE}
+
+    # -----------------------------
+    # Slack alert config
+    # -----------------------------
+    SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL}
+    FRAUD_ALERT_THRESHOLD: ${FRAUD_ALERT_THRESHOLD}
+
+  volumes:
+    # Airflow folders
+    - ./dags:/opt/airflow/dags
+    - ./logs:/opt/airflow/logs
+    - ./plugins:/opt/airflow/plugins
+    - ./scripts:/opt/airflow/scripts
+    - ./requirements.txt:/opt/airflow/requirements.txt
+
+    # Mount entire project
+    # Your local project → /project inside container
+    - ../:/project
+
+  user: "${AIRFLOW_UID:-50000}:${AIRFLOW_GID:-0}"
+
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+# -------------------------------------------------
+# Services
+# -------------------------------------------------
+services:
+
+  # -----------------------------
+  # Postgres metadata DB
+  # -----------------------------
+  postgres:
+    image: postgres:13
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 5
+
+  # -----------------------------
+  # Airflow DB init + admin user
+  # -----------------------------
+  airflow-init:
+    <<: *airflow-common
+    command: >
+      bash -c "
+      airflow db migrate &&
+      airflow users create
+      --username admin
+      --password admin
+      --firstname Admin
+      --lastname User
+      --role Admin
+      --email admin@example.com
+      "
+    restart: "no"
+
+  # -----------------------------
+  # Scheduler
+  # -----------------------------
+  scheduler:
+    <<: *airflow-common
+    command: airflow scheduler
+    restart: always
+
+  # -----------------------------
+  # Webserver
+  # -----------------------------
+  webserver:
+    <<: *airflow-common
+    command: airflow webserver
+    ports:
+      - "8080:8080"
+    restart: always
+
+# -------------------------------------------------
+# Volumes
+# -------------------------------------------------
+volumes:
+  postgres-db-volume:

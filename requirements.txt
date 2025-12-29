@@ -1,0 +1,8 @@
+pandas>=2.0
+numpy>=1.25
+scikit-learn>=1.2
+joblib>=1.3
+snowflake-connector-python>=3.0
+python-dotenv
+flask
+plotly
