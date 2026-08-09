@@ -44,7 +44,7 @@ machine, not what the code appears to do.
 | Dashboard (`dashboard/app.py`) | Runs. Verified rendering 29,178 transactions with no console or server errors. Falls back to local scores when Snowflake credentials are absent. |
 | Load to Snowflake (`etl/ingest_to_snowflake.py`) | Code exists, still has absolute paths. Never run against a warehouse. |
 | Batch scoring to Snowflake (`models/score_batch.py`) | Column-name bug fixed, still has absolute paths. Never run against a warehouse. |
-| Airflow DAGs | Defined, never executed. Airflow 2 syntax; migration to Airflow 3 pending. |
+| Airflow DAGs | Airflow 3 syntax. Files compile and the Compose YAML is structurally valid, but **never executed** — Airflow does not run natively on Windows, so this needs WSL or Docker. |
 | Slack alerting (`models/check_fraud_alerts.py`) | Code exists. Never run. |
 
 ## Model results
@@ -103,8 +103,8 @@ Reproduce with `python models/evaluate.py`.
   a random forest on the same features. Both measured; see DESIGN.md
   section 4 for why the unsupervised model ships anyway and what it costs.
 - Three warehouse scripts still carry absolute `/project/...` paths.
-- The five wrapper scripts in `airflow/scripts/` import functions that do not
-  exist in their target modules and raise `ImportError` on execution.
+- Neither Airflow DAG has been executed, and `airflow/docker-compose.yaml`
+  has never been started.
 
 ## What runs today
 

@@ -1,33 +1,38 @@
-version: "3.8"
+# Local Airflow 3 for running the two DAGs in this directory.
+#
+# STATUS: never run. This file was migrated from an Airflow 2.9.1 setup so it
+# stops contradicting the DAGs, which are Airflow 3 syntax. It has not been
+# started, so treat it as a starting point rather than a working recipe. The
+# official compose file published with the Airflow release you use is the
+# authoritative reference and will be more complete than this.
+#
+# What changed from the Airflow 2 version, and why each matters:
+#   - image 2.9.1 -> 3.x
+#   - "airflow webserver" is now "airflow api-server"
+#   - the DAG processor is a separate component in Airflow 3 and needs its
+#     own service; in Airflow 2 the scheduler parsed DAGs itself
+#   - a triggerer service is needed for deferrable operators
+#   - "airflow users create" was removed; Airflow 3 uses an auth manager, and
+#     the simple auth manager writes a generated password into the API
+#     server's logs on first start
+#
+# Credentials come from a .env file in this directory, which is gitignored.
+# Do not commit one.
 
-# -------------------------------------------------
-# Common Airflow configuration
-# -------------------------------------------------
 x-airflow-common: &airflow-common
-  image: apache/airflow:2.9.1
-
-  # Load environment variables (Snowflake, Slack, etc.)
+  image: apache/airflow:3.0.3
   env_file:
     - .env
-
   environment:
-    # -----------------------------
-    # Airflow core configuration
-    # -----------------------------
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-    AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth
-
-    # -----------------------------
-    # Force Postgres (NO SQLite)
-    # -----------------------------
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.api_fastapi.auth.managers.simple.simple_auth_manager.SimpleAuthManager
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://api-server:8080/execution/
     _PIP_ADDITIONAL_REQUIREMENTS: "-r /opt/airflow/requirements.txt"
 
-    # -----------------------------
-    # Explicitly pass Snowflake vars
-    # (prevents env issues in tasks)
-    # -----------------------------
+    # Passed through explicitly so tasks see them regardless of how the
+    # env_file is interpreted.
     SNOW_USER: ${SNOW_USER}
     SNOW_PWD: ${SNOW_PWD}
     SNOW_ACCOUNT: ${SNOW_ACCOUNT}
@@ -35,41 +40,28 @@ x-airflow-common: &airflow-common
     SNOW_SCHEMA: ${SNOW_SCHEMA}
     SNOW_WAREHOUSE: ${SNOW_WAREHOUSE}
     SNOW_ROLE: ${SNOW_ROLE}
-
-    # -----------------------------
-    # Slack alert config
-    # -----------------------------
     SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL}
     FRAUD_ALERT_THRESHOLD: ${FRAUD_ALERT_THRESHOLD}
 
   volumes:
-    # Airflow folders
     - ./dags:/opt/airflow/dags
     - ./logs:/opt/airflow/logs
     - ./plugins:/opt/airflow/plugins
-    - ./scripts:/opt/airflow/scripts
     - ./requirements.txt:/opt/airflow/requirements.txt
-
-    # Mount entire project
-    # Your local project → /project inside container
+    # The repository root, so BashOperator tasks can call the project
+    # scripts at /project/... as the DAGs expect.
     - ../:/project
 
-  user: "${AIRFLOW_UID:-50000}:${AIRFLOW_GID:-0}"
+  user: "${AIRFLOW_UID:-50000}:0"
 
   depends_on:
     postgres:
       condition: service_healthy
 
-# -------------------------------------------------
-# Services
-# -------------------------------------------------
 services:
 
-  # -----------------------------
-  # Postgres metadata DB
-  # -----------------------------
   postgres:
-    image: postgres:13
+    image: postgres:16
     environment:
       POSTGRES_USER: airflow
       POSTGRES_PASSWORD: airflow
@@ -81,44 +73,32 @@ services:
       interval: 5s
       retries: 5
 
-  # -----------------------------
-  # Airflow DB init + admin user
-  # -----------------------------
   airflow-init:
     <<: *airflow-common
-    command: >
-      bash -c "
-      airflow db migrate &&
-      airflow users create
-      --username admin
-      --password admin
-      --firstname Admin
-      --lastname User
-      --role Admin
-      --email admin@example.com
-      "
+    command: bash -c "airflow db migrate"
     restart: "no"
 
-  # -----------------------------
-  # Scheduler
-  # -----------------------------
   scheduler:
     <<: *airflow-common
     command: airflow scheduler
     restart: always
 
-  # -----------------------------
-  # Webserver
-  # -----------------------------
-  webserver:
+  dag-processor:
     <<: *airflow-common
-    command: airflow webserver
+    command: airflow dag-processor
+    restart: always
+
+  triggerer:
+    <<: *airflow-common
+    command: airflow triggerer
+    restart: always
+
+  api-server:
+    <<: *airflow-common
+    command: airflow api-server
     ports:
       - "8080:8080"
     restart: always
 
-# -------------------------------------------------
-# Volumes
-# -------------------------------------------------
 volumes:
   postgres-db-volume:
