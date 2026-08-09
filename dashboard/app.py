@@ -1,212 +1,229 @@
-# dashboard/app.py
 """
 Streamlit fraud monitoring dashboard.
 
-- Connects to Snowflake using env vars
-- Shows KPIs, anomaly trends over transaction event time, and a drill-down
+Reads scored transactions and shows volume over time, the score distribution,
+and a per-transaction drill-down. The numbers are as fresh as the last
+completed scoring run, not live.
 
-Reads FRAUD_SCORES, which is written by the hourly batch scoring job. The
-numbers shown are as fresh as the last completed run, not live.
+Two data sources
+----------------
+If Snowflake credentials are present it reads FRAUD_SCORES. Otherwise it
+falls back to data/scores/scores.csv, which run_pipeline.py produces. The
+fallback exists so the dashboard can be run and demonstrated without a
+warehouse, and so this file is not the one part of the project that cannot
+be verified.
+
+On the chart that used to be here
+---------------------------------
+The previous version computed offsets = np.linspace(0, 59, n) and added them
+to every timestamp before plotting, spreading all rows evenly across sixty
+seconds. It was labelled "transactions per minute" and showed a shape that
+was not in the data at all. The underlying reason was that the generator
+stamped every transaction with the same timestamp, so there was genuinely no
+time series to draw. The generator was fixed first; this chart now plots
+event_time as it actually is, and where the data is sparse the chart shows
+that rather than manufacturing a curve.
 """
 
 import os
-import io
-from datetime import datetime, timedelta, timezone
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
 
 import pandas as pd
-import streamlit as st
 import plotly.express as px
-from dotenv import load_dotenv
-import snowflake.connector
-import numpy as np
+import streamlit as st
 
-# -------------------------------------------------
-# ENV
-# -------------------------------------------------
-load_dotenv()
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-SNOW_USER = os.getenv("SNOW_USER")
-SNOW_PWD = os.getenv("SNOW_PWD")
-SNOW_ACCOUNT = os.getenv("SNOW_ACCOUNT")
-SNOW_DATABASE = os.getenv("SNOW_DATABASE", "FRAUD_DB")
-SNOW_SCHEMA = os.getenv("SNOW_SCHEMA", "PUBLIC")
-SNOW_WAREHOUSE = os.getenv("SNOW_WAREHOUSE", "COMPUTE_WH")
-SNOW_ROLE = os.getenv("SNOW_ROLE")
+from config import SCORES_DIR, load_env, snowflake_args  # noqa: E402
 
-# -------------------------------------------------
-# STREAMLIT PAGE
-# -------------------------------------------------
+load_env()
+
 st.set_page_config(page_title="Fraud Monitoring", layout="wide")
 st.title("Fraud Monitoring Dashboard")
-st.markdown(
-    "Anomaly scores from the hourly batch scoring job, read from Snowflake. "
-    "Figures reflect the last completed run."
-)
 
-# -------------------------------------------------
-# SNOWFLAKE CONNECTION
-# -------------------------------------------------
+
+# -------------------------------------------------------------------------
+# Data access
+# -------------------------------------------------------------------------
 @st.cache_resource(show_spinner=False)
 def get_snowflake_conn():
-    conn_args = {
-        "user": SNOW_USER,
-        "password": SNOW_PWD,
-        "account": SNOW_ACCOUNT,
-        "warehouse": SNOW_WAREHOUSE,
-        "database": SNOW_DATABASE,
-        "schema": SNOW_SCHEMA,
-    }
-    if SNOW_ROLE:
-        conn_args["role"] = SNOW_ROLE
-    return snowflake.connector.connect(**conn_args)
+    import snowflake.connector
+    return snowflake.connector.connect(**snowflake_args())
 
-# -------------------------------------------------
-# QUERIES
-# -------------------------------------------------
-@st.cache_data(ttl=60, show_spinner=False)
-def query_fraud_scores(start_ts, end_ts, min_score):
-    conn = get_snowflake_conn()
-    sql = """
-        SELECT
-            TRANSACTION_ID,
-            USER_ID,
-            EVENT_TIME,
-            SCORE,
-            FLAGGED,
-            MODEL_VERSION,
-            SCORED_AT
-        FROM FRAUD_SCORES
-        WHERE EVENT_TIME BETWEEN %s AND %s
-        ORDER BY EVENT_TIME ASC
-    """
-    df = pd.read_sql(sql, conn, params=(start_ts, end_ts))
-    if df.empty:
-        return df
-
-    df["SCORED_AT"] = pd.to_datetime(df["SCORED_AT"], utc=True)
-    df["EVENT_TIME"] = pd.to_datetime(df["EVENT_TIME"], utc=True)
-    df = df[df["SCORE"] >= min_score]
-    return df
 
 @st.cache_data(ttl=60, show_spinner=False)
-def query_raw_transaction(txn_id):
-    conn = get_snowflake_conn()
-    sql = """
-        SELECT *
-        FROM RAW_TRANSACTIONS
-        WHERE TRANSACTION_ID = %s
-        LIMIT 1
+def load_scores():
     """
-    return pd.read_sql(sql, conn, params=(txn_id,))
+    Return (dataframe, source_description).
 
-# -------------------------------------------------
-# SIDEBAR
-# -------------------------------------------------
+    Column names are normalised to lowercase so the rest of the app does not
+    care which source it came from.
+    """
+    if snowflake_args() is not None:
+        sql = """
+            SELECT TRANSACTION_ID, USER_ID, EVENT_TIME, SCORE,
+                   FLAGGED, MODEL_VERSION, SCORED_AT
+            FROM FRAUD_SCORES
+        """
+        df = pd.read_sql(sql, get_snowflake_conn())
+        source = "Snowflake FRAUD_SCORES"
+    else:
+        path = SCORES_DIR / "scores.csv"
+        if not path.exists():
+            return None, str(path)
+        df = pd.read_csv(path)
+        source = f"local file {path.name}"
+
+    df.columns = [c.lower() for c in df.columns]
+    df["event_time"] = pd.to_datetime(df["event_time"], errors="coerce")
+    df["scored_at"] = pd.to_datetime(df["scored_at"], errors="coerce")
+    df["flagged"] = df["flagged"].astype(str).str.lower().isin(["true", "1"])
+    return df.dropna(subset=["event_time"]), source
+
+
+data, source = load_scores()
+
+if data is None:
+    st.error(
+        f"No scored data found. Expected Snowflake credentials in .env, or a "
+        f"local scores file at {source}.\n\nRun `python run_pipeline.py` to "
+        f"produce one.")
+    st.stop()
+
+st.caption(f"Source: {source}. Figures reflect the last completed scoring run.")
+
+
+# -------------------------------------------------------------------------
+# Filters
+# -------------------------------------------------------------------------
 with st.sidebar:
     st.header("Filters")
 
-    start_date = st.date_input("Start date (UTC)", datetime.utcnow().date())
-    end_date = st.date_input("End date (UTC)", datetime.utcnow().date())
+    earliest = data["event_time"].min().date()
+    latest = data["event_time"].max().date()
 
-    start_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=timezone.utc)
-    end_dt = datetime.combine(end_date, datetime.max.time()).replace(tzinfo=timezone.utc)
+    start_date = st.date_input("Start date (UTC)", earliest,
+                               min_value=earliest, max_value=latest)
+    end_date = st.date_input("End date (UTC)", latest,
+                             min_value=earliest, max_value=latest)
 
     min_score = st.slider("Minimum score", 0.0, 1.0, 0.0, 0.01)
-    flagged_only = st.checkbox("Flagged only (anomalies)")
-    refresh = st.button("Refresh data")
+    flagged_only = st.checkbox("Flagged only")
 
-if refresh:
-    query_fraud_scores.clear()
-    query_raw_transaction.clear()
-    st.experimental_rerun()
+    if st.button("Refresh data"):
+        load_scores.clear()
+        st.rerun()
 
-# -------------------------------------------------
-# LOAD DATA
-# -------------------------------------------------
-df_scores = query_fraud_scores(start_dt, end_dt, min_score)
+mask = (
+    (data["event_time"].dt.date >= start_date)
+    & (data["event_time"].dt.date <= end_date)
+    & (data["score"] >= min_score)
+)
+window = data[mask]
 
-if df_scores.empty:
-    st.info("No scored transactions found for the selected window.")
+if window.empty:
+    st.info("No scored transactions in the selected window.")
     st.stop()
 
-df_display = df_scores[df_scores["FLAGGED"]] if flagged_only else df_scores.copy()
+display = window[window["flagged"]] if flagged_only else window
 
-# -------------------------------------------------
+
+# -------------------------------------------------------------------------
 # KPIs
-# -------------------------------------------------
+# -------------------------------------------------------------------------
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("Total scored", len(df_scores))
-c2.metric("Anomalies (flagged)", int(df_scores["FLAGGED"].sum()))
-c3.metric("Avg score", round(df_scores["SCORE"].mean(), 4))
-c4.metric("Max score", round(df_scores["SCORE"].max(), 4))
+c1.metric("Transactions scored", f"{len(window):,}")
+c2.metric("Flagged", f"{int(window['flagged'].sum()):,}")
+c3.metric("Alert rate", f"{window['flagged'].mean():.2%}")
+c4.metric("Max score", f"{window['score'].max():.4f}")
 
-# -------------------------------------------------
-# ✅ MINUTE-LEVEL TIME SERIES (FIX)
-# -------------------------------------------------
-ts_df = df_scores.copy()
 
-# Convert to naive UTC
-ts_df["SCORED_AT"] = ts_df["SCORED_AT"].dt.tz_convert("UTC").dt.tz_localize(None)
+# -------------------------------------------------------------------------
+# Volume over transaction event time
+# -------------------------------------------------------------------------
+st.subheader("Transactions and flags over time")
 
-# 🔥 VISUALIZATION FIX:
-# Spread timestamps over 60 seconds ONLY for plotting
-n = len(ts_df)
-offsets = np.linspace(0, 59, n)
+span_hours = (window["event_time"].max() - window["event_time"].min()) / pd.Timedelta(hours=1)
 
-ts_df["viz_time"] = ts_df["SCORED_AT"] + pd.to_timedelta(offsets, unit="s")
+# Pick a bucket that yields a readable number of points rather than assuming
+# a fixed granularity. With one day selected this gives hourly buckets; with
+# thirty days it gives daily ones.
+if span_hours <= 3:
+    freq, label = "5min", "5-minute buckets"
+elif span_hours <= 48:
+    freq, label = "1h", "hourly buckets"
+else:
+    freq, label = "1D", "daily buckets"
 
-# Aggregate by second (now it will spread)
-ts_df["viz_second"] = ts_df["viz_time"].dt.floor("S")
-
-agg = (
-    ts_df.groupby("viz_second")
-    .agg(
-        total=("SCORE", "count"),
-        anomalies=("FLAGGED", "sum"),
-    )
+buckets = (
+    window.set_index("event_time")
+    .resample(freq)
+    .agg(transactions=("score", "count"), flagged=("flagged", "sum"))
     .reset_index()
 )
 
-st.subheader("Transactions / Anomalies per minute")
+# Be explicit when there is too little data for the shape to mean anything,
+# rather than drawing a smooth line over three points.
+if len(buckets) < 5:
+    st.warning(
+        f"Only {len(buckets)} {label.split()[0]} bucket(s) of data in this "
+        f"window. The chart below is shown for completeness but the shape is "
+        f"not meaningful at this resolution. Widen the date range.")
 
-if not agg.empty:
-    fig = px.line(
-    agg,
-    x="viz_second",
-    y=["total", "anomalies"],
-    labels={"value": "count", "viz_second": "Time (UTC)"},
-    markers=True,
+fig = px.bar(buckets, x="event_time", y="transactions",
+             labels={"event_time": "Event time (UTC)", "transactions": "Transactions"})
+fig.add_scatter(x=buckets["event_time"], y=buckets["flagged"],
+                mode="lines+markers", name="Flagged", yaxis="y2")
+fig.update_layout(
+    yaxis2=dict(title="Flagged", overlaying="y", side="right",
+                rangemode="tozero", showgrid=False),
+    legend=dict(orientation="h", yanchor="bottom", y=1.02),
+    bargap=0.1,
 )
+st.plotly_chart(fig, use_container_width=True)
+st.caption(f"{label}, plotted on transaction event time. "
+           f"{len(buckets)} buckets covering {span_hours:.0f} hours.")
 
-    fig.update_layout(legend_title_text="Metric")
-    st.plotly_chart(fig, use_container_width=True)
-else:
-    st.write("No time series data.")
 
-# -------------------------------------------------
-# TABLE
-# -------------------------------------------------
-st.subheader("Top scored transactions")
+# -------------------------------------------------------------------------
+# Score distribution
+# -------------------------------------------------------------------------
+st.subheader("Score distribution")
+hist = px.histogram(window, x="score", color="flagged", nbins=60,
+                    labels={"score": "Anomaly score", "count": "Transactions"})
+hist.update_layout(barmode="overlay", legend=dict(orientation="h",
+                                                  yanchor="bottom", y=1.02))
+hist.update_traces(opacity=0.75)
+st.plotly_chart(hist, use_container_width=True)
+st.caption(
+    "Scores are min-max scaled within a scoring run, so the axis is "
+    "comparable inside one run but not across runs.")
+
+
+# -------------------------------------------------------------------------
+# Table and drill-down
+# -------------------------------------------------------------------------
+st.subheader("Highest scoring transactions")
 
 rows = st.number_input("Rows to show", 10, 1000, 50, 10)
-st.dataframe(df_display.head(rows), use_container_width=True)
+ranked = display.sort_values("score", ascending=False)
+st.dataframe(
+    ranked.head(rows)[["transaction_id", "user_id", "event_time", "score",
+                       "flagged", "model_version"]],
+    use_container_width=True, hide_index=True)
 
-# -------------------------------------------------
-# DRILL DOWN
-# -------------------------------------------------
-st.subheader("Investigate transaction")
-txn_id = st.selectbox(
-    "Choose transaction ID",
-    df_display["TRANSACTION_ID"].head(200).tolist(),
-)
+st.subheader("Investigate a transaction")
 
-if txn_id:
-    raw_tx = query_raw_transaction(txn_id)
-    if not raw_tx.empty:
-        st.json(raw_tx.iloc[0].to_dict())
+if ranked.empty:
+    st.info("No transactions match the current filters.")
+else:
+    txn_id = st.selectbox("Transaction ID", ranked["transaction_id"].head(200).tolist())
+    if txn_id:
+        record = ranked[ranked["transaction_id"] == txn_id].iloc[0]
+        st.json({k: (str(v) if isinstance(v, (pd.Timestamp, datetime)) else v)
+                 for k, v in record.to_dict().items()})
 
-# -------------------------------------------------
-# FOOTER
-# -------------------------------------------------
 st.markdown("---")
-st.caption("Streamlit dashboard | Snowflake backend | all times UTC")
+st.caption("Streamlit dashboard | all times UTC")
