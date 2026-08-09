@@ -42,10 +42,9 @@ from sklearn.ensemble import IsolationForest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config import (  # noqa: E402
-    ARCHIVE_DIR, MODEL_DIR, PROCESSED_DIR, SCORES_DIR, ensure_dirs,
+    ARCHIVE_PROCESSED_DIR, MODEL_DIR, PROCESSED_DIR, SCORES_DIR, ensure_dirs,
+    processed_files,
 )
-
-ARCHIVE_PROCESSED_DIR = ARCHIVE_DIR / "processed"
 from models.features import FEATURE_COLUMNS, compute_features  # noqa: E402
 from models.thresholds import best_f1_threshold, threshold_for_alert_rate  # noqa: E402
 
@@ -65,8 +64,7 @@ def load_processed(days=None):
     that happens to have reached Snowflake already would shrink the training
     set on every run.
     """
-    files = sorted(PROCESSED_DIR.glob("*.csv")) + \
-        sorted(ARCHIVE_PROCESSED_DIR.glob("*.csv"))
+    files = processed_files()
     if not files:
         raise SystemExit(
             f"No processed data in {PROCESSED_DIR} or {ARCHIVE_PROCESSED_DIR}.\n"

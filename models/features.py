@@ -34,9 +34,16 @@ term would only overtake that constant at roughly a hundred thousand
 transactions per single user.
 
 So the accurate claim is that this rewrite removes a large constant factor,
-not that it changes the growth rate at realistic scale. Measured speedup on
-the full 29,178-row dataset is 344x, and the quadratic term is removed as
-well, which matters only for pathologically deep single-user history.
+not that it changes the growth rate at realistic scale.
+
+On the speedup figure specifically: it is over 100x but it is not a stable
+number, and it should not be quoted to three significant figures. Repeated
+runs of the benchmark on the same machine and the same data have produced
+107x, 110x, 319x and 344x. The vectorised pass takes 0.07 to 0.15 seconds on
+29,178 rows, small enough that background load moves the ratio by a factor of
+three. The stable quantities are the loop's cost per row, which sits between
+0.49 and 0.70 ms across sessions and barely moves with history depth, and the
+absolute vectorised time. Quote those, or say "two orders of magnitude".
 
 This version sorts once and uses pandas' time-based rolling window, which
 advances two pointers over sorted data: O(n log n) for the sort, O(n) for the

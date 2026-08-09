@@ -60,7 +60,9 @@ from sklearn.preprocessing import StandardScaler
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from config import GROUND_TRUTH_PATH, PROCESSED_DIR, SCORES_DIR, ensure_dirs  # noqa: E402
+from config import (  # noqa: E402
+    GROUND_TRUTH_PATH, PROCESSED_DIR, SCORES_DIR, ensure_dirs, processed_files,
+)
 from models.features import ABSOLUTE_FEATURES, FEATURE_COLUMNS, compute_features  # noqa: E402
 from models.thresholds import best_f1_threshold  # noqa: E402
 
@@ -76,7 +78,7 @@ ALERT_RATES = [0.001, 0.0028, 0.005, 0.01, 0.02]
 
 
 def load_data():
-    files = sorted(PROCESSED_DIR.glob("*.csv"))
+    files = processed_files()
     if not files:
         raise SystemExit(f"No processed data in {PROCESSED_DIR}. Run run_pipeline.py first.")
 

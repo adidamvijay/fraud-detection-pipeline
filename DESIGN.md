@@ -704,10 +704,15 @@ n) then O(n). But I benchmarked it and the asymptotic story is not why it was
 slow. Going from 250 to 2,000 transactions per user moved the loop's cost per
 row only from 0.654ms to 0.699ms, so the O(k) term contributes almost
 nothing at realistic depth. What costs 0.67ms per row is the fixed overhead
-of doing anything per-row in Python and pandas. The measured speedup is 344x
-and it is a constant-factor win. `benchmarks/feature_complexity.py`
-reproduces it, and asserts both implementations agree on all four original
-features.
+of doing anything per-row in Python and pandas. The measured speedup is over
+100x, though the exact ratio is noisy: repeated runs on the same machine and
+data have given 107x, 110x, 319x and 344x, because the vectorised pass takes
+only 0.07 to 0.15 seconds and background load moves the ratio by a factor of
+three. The stable quantities are the loop's per-row cost, 0.49 to 0.70 ms
+across sessions, and the absolute vectorised time; quote those rather than a
+ratio. Either way it is a constant-factor win, not a change in growth rate.
+`benchmarks/feature_complexity.py` reproduces all of it, and asserts both
+implementations agree on all four original features.
 
 **Q. How would you expose scores as an API?**
 For lookups of already-scored transactions, a read endpoint over

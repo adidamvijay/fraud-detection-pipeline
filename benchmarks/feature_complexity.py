@@ -19,7 +19,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from config import PROCESSED_DIR  # noqa: E402
+from config import PROCESSED_DIR, processed_files  # noqa: E402
 from models.features import compute_features  # noqa: E402
 
 
@@ -55,7 +55,7 @@ def compute_features_loop(df):
 
 
 def load_transactions():
-    files = sorted(PROCESSED_DIR.glob("*.csv"))
+    files = processed_files()
     if not files:
         raise SystemExit(
             f"No processed data in {PROCESSED_DIR}. Run the pipeline first:\n"

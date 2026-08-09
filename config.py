@@ -63,10 +63,28 @@ FEATURE_COLUMNS = [
 ]
 
 
+ARCHIVE_PROCESSED_DIR = ARCHIVE_DIR / "processed"
+
+
 def ensure_dirs():
     """Create every pipeline directory. Safe to call repeatedly."""
     for directory in ALL_DIRS:
         directory.mkdir(parents=True, exist_ok=True)
+
+
+def processed_files():
+    """
+    Every processed CSV, whether or not it has been loaded to the warehouse.
+
+    etl/ingest_to_snowflake.py moves a file to data/archive/processed once it
+    has been merged into RAW_TRANSACTIONS. Anything that reads the processed
+    layer therefore has to read both directories, or it silently sees an
+    empty dataset the moment the warehouse loader has run. Training, the
+    evaluation and the benchmark all go through here so they cannot disagree
+    about what "the processed data" means.
+    """
+    return sorted(PROCESSED_DIR.glob("*.csv")) + \
+        sorted(ARCHIVE_PROCESSED_DIR.glob("*.csv"))
 
 
 def load_env():

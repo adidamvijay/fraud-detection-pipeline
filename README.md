@@ -34,7 +34,7 @@ machine, not what the code appears to do.
 | Transaction generator (`etl/generate_transactions.py`) | Runs. Output verified, numbers below. |
 | Data validation (`etl/validate_data.py`) | Runs. Rules verified against deliberately corrupt input. |
 | Local ingestion (`etl/ingest_local.py`) | Runs. |
-| Feature computation (`models/features.py`) | Runs. Vectorised, 344x faster, verified identical to the old implementation on all four features. |
+| Feature computation (`models/features.py`) | Runs. Vectorised, over 100x faster (the ratio is noisy — see DESIGN.md), verified identical to the old implementation on all four features. |
 | Model training (`models/train_local.py`) | Runs from local CSVs, no warehouse needed. |
 | Local pipeline (`run_pipeline.py`) | Runs end to end in 10s. |
 | Model evaluation (`models/evaluate.py`) | Runs. Held-out temporal split, four models, per-typology recall, alert-budget table, two trivial baselines. |
