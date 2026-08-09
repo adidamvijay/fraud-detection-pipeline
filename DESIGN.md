@@ -16,10 +16,11 @@ behaviour, four absolute and three expressed relative to the user's own
 trailing baseline, then scores every transaction with an Isolation Forest and
 writes the result to a table the dashboard reads. It is designed to run
 hourly for scoring and daily for retraining under Apache Airflow, against
-Snowflake. The interesting part is not the model, it is that the model is
-measured against labelled ground truth with a held-out temporal split, and
-the measurement says the model is only slightly better than sorting
-transactions by amount.
+Snowflake. The interesting part is not the model, it is the measurement: on a
+held-out temporal split the unsupervised model beats sorting by amount by
+only 16%, and a supervised random forest on the identical features is 4.2
+times better than both, which turns "why unsupervised" from an assumption
+into a tradeoff I can price.
 
 ## 2. Architecture as built
 
@@ -177,31 +178,31 @@ production.
 
 ### Why Isolation Forest, given that labels exist
 
-Honest answer: the labels exist only because the data is synthetic. In a real
-fraud system, ground truth arrives weeks later via chargebacks, arrives only
-for transactions someone bothered to dispute, and is therefore both delayed
-and biased. An unsupervised detector can score a transaction the moment it
-lands, and it can flag a fraud pattern nobody has labelled yet.
+The argument for unsupervised detection is about how labels behave in
+production, not about accuracy. Real fraud labels arrive weeks late, via
+chargebacks. They arrive only for transactions a customer bothered to
+dispute, so they are biased toward fraud victims notice. And they cannot
+exist at all for a pattern nobody has seen yet. An unsupervised detector
+scores a transaction the moment it lands and can flag a novel pattern with no
+label behind it.
 
-That is the argument. The measurement below partly undercuts it, and the
-undercutting is the interesting part: a supervised model would very likely do
-better on this data, and the evaluation shows exactly where the unsupervised
-model fails.
+That is the reasoning. I then measured what it costs, by training supervised
+models on the identical features and split. The cost is large, and the
+measurement is in the next section rather than hidden in a limitations
+paragraph.
 
-Alternatives considered and rejected:
+Alternatives considered:
 
-- **Supervised classifier (logistic regression, gradient boosting).** Would
-  almost certainly beat this on the card-testing typology, because it can
-  learn a conjunction of moderate deviations rather than relying on single-
-  axis extremes. Rejected for the framing reason above, and because training
-  on 175 positives invites overfitting. This is the alternative I would
-  actually build next.
-- **Local Outlier Factor.** Density-based and better at exactly the
-  conjunction case Isolation Forest misses, but it does not produce a
-  reusable model object for scoring new data without refitting.
-- **Rule thresholds.** The `amount` baseline below is effectively this, and
-  it performs nearly as well as the model, which is a real finding rather
-  than a rhetorical device.
+- **Supervised classifiers.** Built and measured. They win decisively; see
+  below. Not adopted as the primary model for the production-framing reason
+  above, but the evaluation now quantifies exactly what that framing costs
+  rather than assuming it is small.
+- **Local Outlier Factor.** Density-based and better at the conjunction case
+  Isolation Forest misses, but it does not produce a reusable model object
+  for scoring new data without refitting the whole neighbourhood structure.
+- **Rule thresholds.** The `amount` baseline is effectively this, and the
+  Isolation Forest beats it by only 16%, which is a real finding rather than
+  a rhetorical device.
 - **Deep learning.** Out of scope, and 29,000 rows with 175 positives does
   not justify it.
 
@@ -234,24 +235,67 @@ of a few points are not meaningful.
 | Ranking | PR-AUC |
 |---|---|
 | random ordering | 0.0054 |
-| **absolute features only (the original 4)** | **0.0232** |
-| rank by transaction amount, largest first | 0.1477 |
-| **absolute + user-relative (7 features)** | **0.1719** |
+| Isolation Forest, absolute features only (the original 4) | 0.0232 |
+| rank by transaction amount, no model at all | 0.1477 |
+| **Isolation Forest, 7 features** (the shipped model) | **0.1719** |
+| Logistic regression, 7 features | 0.5188 |
+| Random forest, 7 features | **0.7221** |
 
-#### Before and after, at the chosen threshold
+#### The operating point
+
+A fraud team's binding constraint is how many alerts an analyst can work
+through in a day. That fixes the alert rate, and everything else follows from
+it. So the useful way to state performance is not "recall is 16%" but "at 25
+alerts per 8,897 transactions, 32% of what we show the analyst is fraud".
+
+The shipped model's chosen operating point is an alert rate of **0.28%**,
+which is **25 alerts per 8,897 transactions**. At that point precision is
+**0.320** and recall is **0.160**.
+
+Isolation Forest with 7 features, across alert budgets:
+
+| Alert rate | Alerts | Precision | Recall | Fraud caught |
+|---|---|---|---|---|
+| 0.10% | 9 | 0.556 | 0.100 | 5 of 50 |
+| **0.28%** | **25** | **0.320** | **0.160** | **8 of 50** |
+| 0.50% | 45 | 0.200 | 0.180 | 9 of 50 |
+| 1.00% | 89 | 0.112 | 0.200 | 10 of 50 |
+| 2.00% | 178 | 0.079 | 0.280 | 14 of 50 |
+
+Read down that table and the shape of the problem is clear: going from 9
+alerts to 178, a twentyfold increase in analyst workload, takes recall from
+10% to 28%. Each extra unit of recall is bought with a steeply rising number
+of false positives. This is what severe class imbalance does to a
+precision/recall curve, and it is why "just lower the threshold" is not a
+strategy.
+
+The full curve on the same model:
+
+| Recall | Precision | Threshold |
+|---|---|---|
+| 6% | 1.000 | 0.13262 |
+| 14% | 0.318 | 0.07245 |
+| 26% | 0.076 | -0.01118 |
+| 44% | 0.065 | -0.04419 |
+| 66% | 0.048 | -0.08964 |
+| 86% | 0.013 | -0.18618 |
+
+Precision is perfect at 6% recall and has collapsed by 26%.
+
+#### Before and after the relative features, at a matched alert rate
 
 | | 4 absolute features | 7 features |
 |---|---|---|
 | PR-AUC | 0.0232 | **0.1719** |
-| ROC-AUC | 0.7040 | **0.8882** |
+| ROC-AUC | 0.7040 | 0.8882 |
 | Precision | 0.042 | **0.320** |
 | Recall | 0.020 | **0.160** |
 | F1 | 0.027 | **0.213** |
-| Caught | 1 of 50 | 8 of 50 |
+| Fraud caught | 1 of 50 | 8 of 50 |
 | Alert rate | 0.27% | 0.28% |
 
-At roughly the same alert volume, the relative features take precision from
-4% to 32% and PR-AUC up 7.4x.
+At the same analyst workload, the relative features take precision from 4% to
+32% and PR-AUC up 7.4x.
 
 #### Recall by fraud typology, at the chosen threshold
 
@@ -281,8 +325,91 @@ exactly why it does well on account takeover, whose
 `amount_vs_user_median` of 14.09 towers over the legitimate 95th percentile
 of 2.83. A conjunction of mild deviations is the case it handles worst.
 
-This is the clearest argument in the repository for a supervised model, and
-it is an argument produced by measurement rather than assumption.
+This is the clearest argument in the repository for a supervised model. The
+next section tests that argument instead of leaving it as a hypothesis.
+
+#### Supervised comparison: what unsupervised costs
+
+Two supervised models were trained on the identical seven features, the
+identical temporal split, and the identical threshold rule. No hyperparameter
+search was run on any of them; defaults plus `class_weight="balanced"`,
+decided in advance.
+
+One methodological difference. A supervised model scores its own training
+rows far too well — a random forest largely memorises them — so a threshold
+read off those scores would be uselessly high. The supervised thresholds
+therefore come from out-of-fold predictions produced by walk-forward
+`TimeSeriesSplit` folds inside the training period. The Isolation Forest does
+not need this because it never sees a label, so its training scores are not
+optimistically biased.
+
+At a matched alert budget of 25 alerts per 8,897 transactions (0.28%):
+
+| Model | PR-AUC | Precision | Recall | Fraud caught |
+|---|---|---|---|---|
+| Isolation Forest, 4 features | 0.0232 | 0.040 | 0.020 | 1 of 50 |
+| Isolation Forest, 7 features | 0.1719 | 0.320 | 0.160 | 8 of 50 |
+| Logistic regression | 0.5188 | 0.680 | 0.340 | 17 of 50 |
+| **Random forest** | **0.7221** | **0.960** | **0.480** | **24 of 50** |
+
+Recall by typology, at each model's own chosen operating point:
+
+| Typology | n | Isolation Forest | Logistic regression | Random forest |
+|---|---|---|---|---|
+| account takeover | 26 | 30.8% | 76.9% | **92.3%** |
+| card testing | 14 | 0.0% | 7.1% | **85.7%** |
+| subtle | 10 | 0.0% | 0.0% | 10.0% |
+
+**The supervised models win, decisively, and it is not close.** The random
+forest has 4.2x the PR-AUC of the shipped model. At the same analyst
+workload it shows 24 frauds where the Isolation Forest shows 8, and 96% of
+what it surfaces is genuine fraud against 32%.
+
+The card-testing row is the important one. Isolation Forest catches 0%. The
+random forest catches 85.7%. That is exactly the prediction made from the
+structural diagnosis — card testing is a conjunction of moderate deviations,
+axis-parallel isolation cannot express a conjunction, and a tree ensemble
+given labels learns one directly. The hypothesis was stated before the
+measurement and the measurement confirmed it.
+
+Note also that logistic regression only reaches 7.1% on card testing. It is a
+linear model, so it also cannot represent a conjunction; it wins on account
+takeover, where a single feature is extreme, and little else. The gap between
+logistic regression and the random forest is itself evidence that the
+conjunction explanation is the right one, rather than "supervised is just
+better".
+
+#### So why is the unsupervised model still the one that ships?
+
+Not because it performs better. It does not. The reasons are about the
+conditions the model would actually operate under, and each one has a cost
+that is now quantified rather than assumed:
+
+1. **Labels arrive weeks late.** Chargebacks take 30 to 90 days. A supervised
+   model trained today is trained on the fraud landscape of three months ago.
+   The evaluation here hands the supervised models labels from the training
+   period as if they were available immediately, which is a benefit they
+   would not have in production. Their real-world numbers would be lower than
+   0.7221 by an amount this repository cannot measure.
+2. **Labels are biased toward fraud that was noticed.** Chargebacks only
+   exist where a customer disputed a charge. Card testing at £1 to £15, the
+   typology the random forest is best at here, is exactly the kind most
+   likely to go undisputed and therefore unlabelled. The training signal that
+   makes the supervised model win on this synthetic data is the signal most
+   likely to be missing from real data.
+3. **Fraud patterns shift faster than a supervised model can be retrained.**
+   An unsupervised detector defines normal and flags departures from it, so a
+   pattern nobody has ever labelled still looks abnormal. A supervised model
+   can only recognise what it has been shown.
+
+The honest summary: on this data, with labels granted for free and instantly,
+a random forest is roughly four times better and I can prove it. I ship the
+unsupervised model because the production setting does not grant labels for
+free or instantly. What I would actually build next is both — the
+unsupervised detector as the always-on layer that catches novel patterns, and
+a supervised model retrained on whatever labels have matured, with the two
+ensembled or at least reconciled. That is what most real fraud stacks do, and
+this evaluation is the argument for it.
 
 #### The threshold, and what it costs
 
@@ -331,12 +458,22 @@ real transaction distributions, because real spending is not lognormal with
 the parameters I picked.
 
 The strongest honest claim is narrower and still worth making: given labelled
-data, this repository measures a model correctly, on a held-out temporal
-split, against a trivial baseline, with a threshold chosen by a stated rule.
-That apparatus would work unchanged on real data. Two facts support the claim
-that it is not merely reflecting its own assumptions: the model fails on one
-of the three typologies I planted, and it barely beats sorting by amount.
-Circular reasoning does not usually produce results that inconvenient.
+data, this repository measures models correctly, on a held-out temporal
+split, against trivial baselines and against each other, with a threshold
+chosen by a stated rule. That apparatus would work unchanged on real data.
+
+Three results support the claim that it is not merely reflecting its own
+assumptions. The shipped model fails completely on one of the three
+typologies I planted. It beats sorting by amount by only 16%. And the
+supervised comparison I ran to test my own reasoning concluded against the
+model I had already built. Circular reasoning does not usually produce
+results that inconvenient.
+
+One caveat specific to the supervised comparison: the random forest's
+advantage is probably overstated even within this synthetic world, because
+the evaluation hands it labels instantly and the typologies are internally
+consistent in a way real fraud is not. The direction of the result is solid.
+The magnitude is not something I would defend to two significant figures.
 
 ## 5. The pipeline
 
@@ -412,12 +549,15 @@ without the MERGE, a retry after a partial write would duplicate rows.
 
 **Q. Explain the precision/recall tradeoff when fraud is 0.1% of traffic.**
 At that prevalence almost everything you flag is wrong unless the model is
-very strong. On this data at 0.56% prevalence, the seven-feature model holds
-precision 1.000 at 6% recall, 0.318 at 14%, and 0.076 by 26%. Precision falls
-off a cliff as you reach for recall, because each additional true positive
-costs an increasing number of false ones. The business question is not "what
-is the best F1" but "how many alerts can the review team process per day",
-which fixes the alert rate, and the threshold follows from that.
+very strong, because the false positives are drawn from a pool a thousand
+times larger than the true ones. On this data at 0.56% prevalence, the
+shipped model holds precision 1.000 at 6% recall, 0.318 at 14%, and 0.076 by
+26%. Stated as workload: going from 9 alerts to 178 per 8,897 transactions, a
+twentyfold increase in analyst time, moves recall from 10% to 28%. The
+business question is therefore not "what threshold maximises F1" but "how
+many alerts can the team work in a day", which fixes the alert rate; the
+threshold and both metrics follow from it. I report the whole budget table
+for that reason rather than a single number.
 
 **Q. Why is accuracy useless here?**
 Because a model that flags nothing scores 99.44% accuracy on this test split
@@ -445,13 +585,38 @@ over the whole dataset before the temporal split, which is safe only because
 of that first property.
 
 **Q. Unsupervised or supervised, when you have labels?**
-I chose unsupervised because real labels arrive weeks late via chargebacks,
-only cover disputed transactions, and cannot catch a pattern nobody has
-labelled. But my own evaluation argues against me: the model catches 30.8% of
-account takeover and 0% of card testing, because card testing is a
-conjunction of moderate deviations and Isolation Forest splits on single
-axes. A supervised model can learn conjunctions. Given these labels I would
-build one next and compare, and I would expect it to win on this data.
+I built both and measured, so I can answer with numbers rather than
+preference. On the same features and split, a random forest gets PR-AUC
+0.7221 against the Isolation Forest's 0.1719 — 4.2 times better. At a matched
+budget of 25 alerts, it surfaces 24 frauds at 96% precision where the
+Isolation Forest surfaces 8 at 32%. Supervised wins decisively.
+
+I still ship the unsupervised one, for three reasons that are about
+production conditions rather than accuracy. Chargeback labels take 30 to 90
+days, so a supervised model is always trained on a stale fraud landscape, and
+my evaluation flatters it by handing over labels instantly. Labels are biased
+toward disputed transactions, and low-value card testing — the typology the
+random forest is best at here — is the least likely to be disputed and so the
+least likely to be labelled in real data. And an unsupervised model can flag
+a pattern that has never been labelled at all.
+
+What I would actually build is both: unsupervised as the always-on layer for
+novel patterns, supervised retrained on matured labels, reconciled. What I
+would not do is claim the unsupervised model is better, because I measured it
+and it is not.
+
+**Q. Why does logistic regression do so much worse than the random forest
+here?**
+Because the thing that separates card testing from normal traffic is a
+conjunction — elevated count *and* unusually small amounts *and* very short
+gaps — and no single one of those is extreme. Logistic regression is linear
+in the features, so it cannot represent an interaction unless I construct one
+by hand. It reaches 76.9% on account takeover, where one feature is extreme
+and a linear boundary suffices, but only 7.1% on card testing. The random
+forest reaches 85.7% on card testing because a tree path *is* a conjunction.
+That gap is also the cleanest evidence that my structural explanation for the
+Isolation Forest's failure is correct, rather than "supervised is just
+better".
 
 **Q. How would you detect model degradation in production?**
 Three signals, none of which needs labels. The distribution of scores over
@@ -558,13 +723,22 @@ rescoring. `LOADED_AT` versus `EVENT_TIME` is what lets you find them.
 
 ## 7. Limitations
 
-**1. The model barely beats sorting by amount.** PR-AUC 0.1719 against
-0.1477 for the trivial baseline, and it catches 0% of card-testing bursts.
-The diagnosis is specific: Isolation Forest uses axis-parallel splits and
-card testing is a conjunction of moderate deviations rather than a single
-extreme. The fix is to train a supervised classifier on the same features and
-compare honestly, accepting that it needs labels and will not generalise to
-unlabelled patterns. That is the next thing I would build.
+**1. The shipped model is the weakest of the four measured.** Isolation
+Forest with 7 features scores PR-AUC 0.1719. Sorting by amount with no model
+scores 0.1477, so it beats the trivial baseline by 16%. A random forest on
+the identical features scores 0.7221, 4.2 times better, and catches 85.7% of
+the card-testing fraud the Isolation Forest misses entirely.
+
+It ships anyway, for the production-conditions reasons set out in section 4:
+chargeback labels arrive 30 to 90 days late, are biased toward disputed
+transactions, and cannot exist for a novel pattern. Those are real
+constraints and they are why unsupervised detection is standard as a first
+layer. But they are a reason to accept the cost, not a reason to pretend the
+cost is small, and 4.2x is not small.
+
+The fix is a two-layer design: the unsupervised detector always on for novel
+patterns, a supervised model retrained on whatever labels have matured, and
+the two reconciled. Not built.
 
 **2. The dashboard's time-series chart is still fabricated.** It spreads
 every scoring timestamp evenly across 60 seconds with `np.linspace` and plots

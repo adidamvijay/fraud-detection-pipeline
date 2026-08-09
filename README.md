@@ -3,14 +3,15 @@
 > **Status — 9 August 2026. Actively being rebuilt, in the open.**
 > An audit found the components worked individually but were not connected to
 > each other, and that the previous README claimed more than the code did.
-> **Current phase:** the local pipeline runs end to end and the model is now
-> measured against held-out labels — PR-AUC 0.1719 against 0.1477 for the
-> trivial "sort by amount" baseline, so the model earns its place narrowly.
-> Done so far: the audit, one canonical Snowflake schema, a rewritten
-> generator, the local path connected, and a real evaluation with a
-> before/after comparison in [DESIGN.md](DESIGN.md). Next: the Snowflake
-> path and the fabricated dashboard chart. This line is updated as each phase
-> completes; the component table below is kept current.
+> **Current phase:** the local pipeline runs end to end, the dashboard shows
+> real data, and four models are measured against held-out labels including
+> supervised comparisons — which show the shipped unsupervised model is 4.2x
+> worse than a random forest on the same features, documented rather than
+> buried. Done so far: the audit, one canonical Snowflake schema, a rewritten
+> generator, the local path connected, a real evaluation, the fabricated
+> chart deleted and an evidence-based threshold wired in. Next: the Snowflake
+> and Airflow paths, which have still never been run. This line is updated as
+> each phase completes; the component table below is kept current.
 
 A batch pipeline that generates synthetic card transactions, validates them,
 loads them into Snowflake, computes per-user rolling features, scores them with
@@ -38,42 +39,69 @@ machine, not what the code appears to do.
 | Feature computation (`models/features.py`) | Runs. Vectorised, 344x faster, verified identical to the old implementation on all four features. |
 | Model training (`models/train_local.py`) | Runs from local CSVs, no warehouse needed. |
 | Local pipeline (`run_pipeline.py`) | Runs end to end in 10s. |
-| Model evaluation (`models/evaluate.py`) | Runs. Held-out temporal split, PR-AUC, per-typology recall, two trivial baselines. Numbers in [DESIGN.md](DESIGN.md). |
+| Model evaluation (`models/evaluate.py`) | Runs. Held-out temporal split, four models, per-typology recall, alert-budget table, two trivial baselines. |
 | Tests (`tests/`) | 11 tests covering feature causality. Verified by mutation. |
+| Dashboard (`dashboard/app.py`) | Runs. Verified rendering 29,178 transactions with no console or server errors. Falls back to local scores when Snowflake credentials are absent. |
 | Load to Snowflake (`etl/ingest_to_snowflake.py`) | Code exists, still has absolute paths. Never run against a warehouse. |
 | Batch scoring to Snowflake (`models/score_batch.py`) | Column-name bug fixed, still has absolute paths. Never run against a warehouse. |
-| Dashboard (`dashboard/app.py`) | Real Streamlit app. **Its time-series chart is still fabricated** — see below. |
 | Airflow DAGs | Defined, never executed. Airflow 2 syntax; migration to Airflow 3 pending. |
 | Slack alerting (`models/check_fraud_alerts.py`) | Code exists. Never run. |
 
 ## Model results
 
-Held-out temporal split, 8,897 test rows containing 50 fraud. Full protocol
-and the before/after comparison are in [DESIGN.md](DESIGN.md).
+Held-out temporal split: trained on the first 21 days, measured on the last
+9. Test set is 8,897 transactions containing 50 fraud. Full protocol,
+before/after comparison and limitations are in [DESIGN.md](DESIGN.md).
 
-| Ranking | PR-AUC |
-|---|---|
-| random ordering | 0.0054 |
-| absolute features only (the original 4) | 0.0232 |
-| rank by transaction amount, no model | 0.1477 |
-| absolute + user-relative (7 features) | **0.1719** |
+### At a fixed analyst workload
 
-Adding three user-relative features took PR-AUC up 7.4x and precision from
-4% to 32% at the same alert volume. The model still only beats sorting by
-amount by 16%, and it catches 0% of card-testing fraud. Both facts are
-documented rather than buried.
+A fraud team's real constraint is how many alerts a person can review, so
+that is how these are stated. At **25 alerts per 8,897 transactions**
+(a 0.28% alert rate):
+
+| Model | PR-AUC | Precision | Recall | Fraud caught |
+|---|---|---|---|---|
+| random ordering | 0.0054 | — | — | — |
+| Isolation Forest, original 4 features | 0.0232 | 0.040 | 0.020 | 1 of 50 |
+| rank by amount, no model at all | 0.1477 | — | — | — |
+| **Isolation Forest, 7 features** (shipped) | **0.1719** | **0.320** | **0.160** | **8 of 50** |
+| Logistic regression, 7 features | 0.5188 | 0.680 | 0.340 | 17 of 50 |
+| Random forest, 7 features | 0.7221 | 0.960 | 0.480 | 24 of 50 |
+
+Two things this table is meant to make unavoidable.
+
+**Adding user-relative features worked.** PR-AUC up 7.4x, precision from 4%
+to 32% at the same workload.
+
+**The supervised models are far better, and the shipped one is not.** A
+random forest on identical features is 4.2x the shipped model's PR-AUC and
+catches 85.7% of card-testing fraud that the Isolation Forest misses
+completely. The unsupervised model ships because chargeback labels arrive 30
+to 90 days late, are biased toward disputed transactions, and cannot exist
+for a pattern nobody has labelled yet — not because it performs better. The
+cost of that choice is measured rather than assumed.
+
+### Recall by fraud typology
+
+| Typology | n | Isolation Forest | Logistic regression | Random forest |
+|---|---|---|---|---|
+| account takeover | 26 | 30.8% | 76.9% | 92.3% |
+| card testing | 14 | 0.0% | 7.1% | 85.7% |
+| subtle | 10 | 0.0% | 0.0% | 10.0% |
+
+Card testing is a conjunction of moderate deviations — somewhat elevated
+count, unusually small amounts, very short gaps — with no single extreme
+value. Isolation Forest splits on one axis at a time and cannot express a
+conjunction; a tree ensemble with labels learns one directly. Logistic
+regression, being linear, also cannot, which is why it reaches only 7.1%.
+
+Reproduce with `python models/evaluate.py`.
 
 ### Known defects not yet fixed
 
-- `dashboard/app.py` spreads all scoring timestamps evenly across 60 seconds
-  with `np.linspace` before plotting them, so the "per minute" chart shows a
-  shape that is not in the data. To be deleted, not patched.
-- The model catches 0% of card-testing fraud. Isolation Forest splits on
-  single axes and card testing is a conjunction of moderate deviations. A
-  supervised classifier is the fix; see limitations in DESIGN.md.
-- `models/train_local.py` still flags using `contamination=0.02`. The
-  evidence-based threshold exists in `models/evaluate.py` but has not been
-  wired back into the scoring path.
+- The shipped model catches 0% of card-testing fraud, and is 4.2x worse than
+  a random forest on the same features. Both measured; see DESIGN.md
+  section 4 for why the unsupervised model ships anyway and what it costs.
 - Three warehouse scripts still carry absolute `/project/...` paths.
 - The five wrapper scripts in `airflow/scripts/` import functions that do not
   exist in their target modules and raise `ImportError` on execution.
