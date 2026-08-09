@@ -1,5 +1,14 @@
 # Fraud Detection Pipeline
 
+> **Status — 9 August 2026. Actively being rebuilt, in the open.**
+> An audit found the components worked individually but were not connected to
+> each other, and that the previous README claimed more than the code did.
+> **Current phase:** reconnecting the pipeline end to end. Done so far: the
+> audit, one canonical Snowflake schema, and a rewritten transaction
+> generator. Next: fixing hardcoded paths, then the first genuine end-to-end
+> run. This line is updated as each phase completes; the component table
+> below is kept current.
+
 A batch pipeline that generates synthetic card transactions, validates them,
 loads them into Snowflake, computes per-user rolling features, scores them with
 an Isolation Forest, and surfaces the results in a Streamlit dashboard.
