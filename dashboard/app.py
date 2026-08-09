@@ -1,8 +1,12 @@
 # dashboard/app.py
 """
-Streamlit Fraud Monitoring Dashboard
+Streamlit fraud monitoring dashboard.
+
 - Connects to Snowflake using env vars
-- Shows KPIs, minute-level anomaly trends, and transaction drill-down
+- Shows KPIs, anomaly trends over transaction event time, and a drill-down
+
+Reads FRAUD_SCORES, which is written by the hourly batch scoring job. The
+numbers shown are as fresh as the last completed run, not live.
 """
 
 import os
@@ -33,10 +37,10 @@ SNOW_ROLE = os.getenv("SNOW_ROLE")
 # STREAMLIT PAGE
 # -------------------------------------------------
 st.set_page_config(page_title="Fraud Monitoring", layout="wide")
-st.title("Real-Time Fraud Monitoring Dashboard")
+st.title("Fraud Monitoring Dashboard")
 st.markdown(
-    "Monitor anomaly scores and investigate suspicious transactions. "
-    "Streamlit MVP tied to Snowflake."
+    "Anomaly scores from the hourly batch scoring job, read from Snowflake. "
+    "Figures reflect the last completed run."
 )
 
 # -------------------------------------------------
@@ -205,4 +209,4 @@ if txn_id:
 # FOOTER
 # -------------------------------------------------
 st.markdown("---")
-st.caption("Streamlit dashboard • Snowflake backend • Minute-level monitoring (UTC)")
+st.caption("Streamlit dashboard | Snowflake backend | all times UTC")

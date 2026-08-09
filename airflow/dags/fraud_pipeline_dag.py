@@ -21,12 +21,12 @@ default_args = {
 # ----------------------------------------------------
 with DAG(
     dag_id="fraud_detection_daily_pipeline",
-    description="End-to-end Fraud Detection Pipeline using Snowflake + ML",
+    description="Daily batch fraud detection pipeline using Snowflake and scikit-learn",
     default_args=default_args,
     schedule_interval="@daily",
     start_date=datetime(2025, 1, 1),
     catchup=False,
-    tags=["fraud", "ml", "snowflake", "resume"],
+    tags=["fraud", "ml", "snowflake", "batch"],
 ) as dag:
 
     # 1️⃣ Validate incoming data
@@ -56,7 +56,7 @@ with DAG(
     # 5️⃣ Score transactions
     score_transactions = BashOperator(
         task_id="score_transactions",
-        bash_command="python /project/models/score_realtime.py",
+        bash_command="python /project/models/score_batch.py",
     )
 
     alert_task = BashOperator(

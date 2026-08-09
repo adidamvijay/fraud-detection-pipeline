@@ -1,4 +1,4 @@
-# models/score_realtime.py
+# models/score_batch.py
 """
 Batch scoring script.
 

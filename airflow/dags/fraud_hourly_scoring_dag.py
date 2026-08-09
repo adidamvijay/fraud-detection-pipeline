@@ -13,17 +13,17 @@ default_args = {
 
 with DAG(
     dag_id="fraud_hourly_scoring_pipeline",
-    description="Hourly fraud scoring using latest ML model",
+    description="Hourly batch fraud scoring using the latest trained model",
     default_args=default_args,
     schedule_interval="0 * * * *",  # every hour
     start_date=datetime(2025, 1, 1),
     catchup=False,
-    tags=["fraud", "ml", "scoring", "realtime"],
+    tags=["fraud", "ml", "scoring", "batch"],
 ) as dag:
 
     score_transactions = BashOperator(
         task_id="score_new_transactions",
-        bash_command="python /project/models/score_realtime.py",
+        bash_command="python /project/models/score_batch.py",
     )
 
     check_alerts = BashOperator(
