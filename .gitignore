@@ -15,3 +15,6 @@ data/processed/
 # OS
 .DS_Store
 Thumbs.db
+
+# Editor / agent config
+.claude/
