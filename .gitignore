@@ -8,9 +8,16 @@ __pycache__/
 airflow/logs/
 airflow/plugins/__pycache__/
 
-# Data
+# Data - all of it is generated and reproducible from a seed
 data/outbox/
 data/processed/
+data/validated/
+data/bad_records/
+data/archive/
+data/scores/
+
+# Trained model artifacts are build output, not source
+models/artifacts/
 
 # OS
 .DS_Store
