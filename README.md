@@ -3,11 +3,13 @@
 > **Status — 9 August 2026. Actively being rebuilt, in the open.**
 > An audit found the components worked individually but were not connected to
 > each other, and that the previous README claimed more than the code did.
-> **Current phase:** reconnecting the pipeline end to end. Done so far: the
-> audit, one canonical Snowflake schema, and a rewritten transaction
-> generator. Next: fixing hardcoded paths, then the first genuine end-to-end
-> run. This line is updated as each phase completes; the component table
-> below is kept current.
+> **Current phase:** the local pipeline now runs end to end — `python
+> run_pipeline.py` takes generated CSVs through validation, ingestion,
+> training and scoring in 14 seconds. Done so far: the audit, one canonical
+> Snowflake schema, a rewritten generator, and the local path connected.
+> Next: model evaluation with real metrics, then the Snowflake path. This
+> line is updated as each phase completes; the component table below is kept
+> current.
 
 A batch pipeline that generates synthetic card transactions, validates them,
 loads them into Snowflake, computes per-user rolling features, scores them with
@@ -30,35 +32,57 @@ machine, not what the code appears to do.
 | Component | Status |
 |---|---|
 | Transaction generator (`etl/generate_transactions.py`) | Runs. Output verified, numbers below. |
-| Data validation (`etl/validate_data.py`) | Logic is sound but hardcoded absolute paths stop it running on Windows. Not yet fixed. |
-| Local ingestion (`etl/ingest_local.py`) | Same path problem. Not yet fixed. |
-| Load to Snowflake (`etl/ingest_to_snowflake.py`) | Code exists. Never run against a warehouse. |
-| Feature computation | Works, but uses a nested Python loop that is quadratic per user. Being replaced. |
-| Model training (`models/feature_and_train_local.py`) | Trains an Isolation Forest. No evaluation of any kind exists yet. |
-| Batch scoring (`models/score_batch.py`) | Column-name bug fixed; never run against a warehouse. |
-| Dashboard (`dashboard/app.py`) | Real Streamlit app. **Its time-series chart is currently fabricated** and is being removed — see below. |
-| Airflow DAGs | Defined, never executed. Written in Airflow 2 syntax; being migrated to Airflow 3. |
+| Data validation (`etl/validate_data.py`) | Runs. Rules verified against deliberately corrupt input. |
+| Local ingestion (`etl/ingest_local.py`) | Runs. |
+| Feature computation (`models/features.py`) | Runs. Vectorised, 344x faster, verified identical to the old implementation on all four features. |
+| Model training (`models/train_local.py`) | Runs from local CSVs, no warehouse needed. |
+| Local pipeline (`run_pipeline.py`) | Runs end to end in 14s. |
+| Model evaluation | **Not built.** Provisional numbers below are not an evaluation. |
+| Load to Snowflake (`etl/ingest_to_snowflake.py`) | Code exists, still has absolute paths. Never run against a warehouse. |
+| Batch scoring to Snowflake (`models/score_batch.py`) | Column-name bug fixed, still has absolute paths. Never run against a warehouse. |
+| Dashboard (`dashboard/app.py`) | Real Streamlit app. **Its time-series chart is still fabricated** — see below. |
+| Airflow DAGs | Defined, never executed. Airflow 2 syntax; migration to Airflow 3 pending. |
 | Slack alerting (`models/check_fraud_alerts.py`) | Code exists. Never run. |
-| Model evaluation | Not built. |
 | Tests | Not built. |
 
 ### Known defects not yet fixed
 
 - `dashboard/app.py` spreads all scoring timestamps evenly across 60 seconds
   with `np.linspace` before plotting them, so the "per minute" chart shows a
-  shape that is not in the data. This is being deleted, not patched.
-- The alert threshold is the 98th percentile of whatever batch is being
-  scored, so exactly 2% of any input is flagged regardless of content.
-- `contamination=0.02` in the model is undocumented and unjustified.
+  shape that is not in the data. To be deleted, not patched.
+- The flagging threshold is still the model's `contamination=0.02`, which is
+  unjustified. It flags 2% of whatever is scored regardless of content.
+- The four features are absolute rather than relative to each user's own
+  baseline, so the model cannot distinguish "large for this user" from
+  "large". Measured consequence: it catches 51% of high-value fraud but only
+  2.5% of card-testing bursts.
+- Three warehouse scripts still carry absolute `/project/...` paths.
 - The five wrapper scripts in `airflow/scripts/` import functions that do not
   exist in their target modules and raise `ImportError` on execution.
 - `requirements.txt` does not match what the code imports.
 
 ## What runs today
 
+The whole local path, on one command, with no warehouse connection:
+
 ```bash
-python etl/generate_transactions.py
+python run_pipeline.py
 ```
+
+Measured on a Windows machine, Python 3.11:
+
+```
+Generate transactions              2.88s
+Validate                           2.61s
+Ingest to processed                2.29s
+Train and score                    6.40s
+total                             14.19s
+```
+
+29,178 transactions generated, 29,178 validated with 0 rejected, 29,178
+scored. Feature computation for all of them takes 0.07s.
+
+### Generator output
 
 500 users over 30 days, seed 42. Measured output:
 
