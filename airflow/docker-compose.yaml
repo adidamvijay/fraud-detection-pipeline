@@ -1,67 +1,75 @@
 # Local Airflow 3 for running the two DAGs in this directory.
 #
-# STATUS: never run. This file was migrated from an Airflow 2.9.1 setup so it
-# stops contradicting the DAGs, which are Airflow 3 syntax. It has not been
-# started, so treat it as a starting point rather than a working recipe. The
-# official compose file published with the Airflow release you use is the
-# authoritative reference and will be more complete than this.
+# STATUS: not yet run. See airflow/RUNBOOK.md.
 #
-# What changed from the Airflow 2 version, and why each matters:
-#   - image 2.9.1 -> 3.x
-#   - "airflow webserver" is now "airflow api-server"
-#   - the DAG processor is a separate component in Airflow 3 and needs its
-#     own service; in Airflow 2 the scheduler parsed DAGs itself
-#   - a triggerer service is needed for deferrable operators
-#   - "airflow users create" was removed; Airflow 3 uses an auth manager, and
-#     the simple auth manager writes a generated password into the API
-#     server's logs on first start
+# Derived from the official Apache Airflow 3.0.3 docker-compose.yaml, with
+# three deliberate differences:
 #
-# Credentials come from a .env file in this directory, which is gitignored.
-# Do not commit one.
+#   1. LocalExecutor instead of CeleryExecutor, so there is no redis broker,
+#      no celery worker and no flower. This pipeline has four sequential
+#      tasks; a distributed queue would be machinery with nothing to do.
+#   2. The repository root is mounted at /project, because the DAGs call the
+#      project scripts by that path.
+#   3. Dependencies come from a Dockerfile rather than
+#      _PIP_ADDITIONAL_REQUIREMENTS, which the Airflow docs warn is for quick
+#      checks only.
+#
+# Everything else - service names, healthchecks, the init container, the
+# depends_on conditions - follows the official file, because those are the
+# parts that are easy to get subtly wrong and tedious to debug.
 
-x-airflow-common: &airflow-common
-  image: apache/airflow:3.0.3
-  env_file:
-    - .env
+x-airflow-common:
+  &airflow-common
+  build: .
+  image: fraud-pipeline-airflow:3.0.3
   environment:
+    &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
-    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
-    AIRFLOW__CORE__AUTH_MANAGER: airflow.api_fastapi.auth.managers.simple.simple_auth_manager.SimpleAuthManager
-    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://api-server:8080/execution/
-    _PIP_ADDITIONAL_REQUIREMENTS: "-r /opt/airflow/requirements.txt"
-
-    # Passed through explicitly so tasks see them regardless of how the
-    # env_file is interpreted.
-    SNOW_USER: ${SNOW_USER}
-    SNOW_PWD: ${SNOW_PWD}
-    SNOW_ACCOUNT: ${SNOW_ACCOUNT}
-    SNOW_DATABASE: ${SNOW_DATABASE}
-    SNOW_SCHEMA: ${SNOW_SCHEMA}
-    SNOW_WAREHOUSE: ${SNOW_WAREHOUSE}
-    SNOW_ROLE: ${SNOW_ROLE}
-    SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL}
-    FRAUD_ALERT_THRESHOLD: ${FRAUD_ALERT_THRESHOLD}
-
+    AIRFLOW__CORE__FERNET_KEY: ''
+    # Left paused so that unpausing is a deliberate act. With schedule
+    # "@daily" and catchup=False, an unpaused DAG starts a run as soon as the
+    # scheduler notices it, which is not what you want while still checking
+    # whether the stack came up correctly.
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: 'http://airflow-apiserver:8080/execution/'
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    # Task processes authenticate to the execution API with a JWT. Every
+    # container must agree on the secret, so it is pinned rather than
+    # generated per container. Local development only.
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:-local-development-not-a-secret}
+    AIRFLOW_CONFIG: '/opt/airflow/config/airflow.cfg'
+  # Snowflake and Slack credentials for the tasks. This is the repository
+  # root .env, so there is one credentials file rather than two.
+  #
+  # Note the difference between this and ${VAR} substitution above: env_file
+  # injects variables into the container at runtime, while ${VAR} is resolved
+  # by docker compose itself and reads airflow/.env. They are separate
+  # mechanisms and reading from the wrong one is a common way to end up with
+  # silently empty credentials.
+  env_file:
+    - ../.env
   volumes:
     - ./dags:/opt/airflow/dags
     - ./logs:/opt/airflow/logs
+    - ./config:/opt/airflow/config
     - ./plugins:/opt/airflow/plugins
-    - ./requirements.txt:/opt/airflow/requirements.txt
-    # The repository root, so BashOperator tasks can call the project
-    # scripts at /project/... as the DAGs expect.
+    # The repository root. The DAGs run `python /project/etl/...`, and the
+    # scripts derive every other path from their own location, so this single
+    # mount is what makes them work inside the container.
     - ../:/project
-
   user: "${AIRFLOW_UID:-50000}:0"
-
   depends_on:
+    &airflow-common-depends-on
     postgres:
       condition: service_healthy
 
 services:
 
   postgres:
-    image: postgres:16
+    image: postgres:13
     environment:
       POSTGRES_USER: airflow
       POSTGRES_PASSWORD: airflow
@@ -70,35 +78,112 @@ services:
       - postgres-db-volume:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "airflow"]
-      interval: 5s
+      interval: 10s
       retries: 5
-
-  airflow-init:
-    <<: *airflow-common
-    command: bash -c "airflow db migrate"
-    restart: "no"
-
-  scheduler:
-    <<: *airflow-common
-    command: airflow scheduler
+      start_period: 5s
     restart: always
 
-  dag-processor:
+  airflow-apiserver:
     <<: *airflow-common
-    command: airflow dag-processor
-    restart: always
-
-  triggerer:
-    <<: *airflow-common
-    command: airflow triggerer
-    restart: always
-
-  api-server:
-    <<: *airflow-common
-    command: airflow api-server
+    command: api-server
     ports:
       - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/version"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
     restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  # Airflow 3 parses DAGs in a separate process from the scheduler. In
+  # Airflow 2 the scheduler did it, which is why this service is new.
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type DagProcessorJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  # Not used by these DAGs, which have no deferrable operators, but the
+  # scheduler logs warnings without it and it costs almost nothing.
+  airflow-triggerer:
+    <<: *airflow-common
+    command: triggerer
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type TriggererJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+
+  # Runs once, before everything else: creates the directories, fixes their
+  # ownership, migrates the database and creates the admin user. The other
+  # services wait on it completing successfully.
+  #
+  # Runs as root because it chowns the mounted volumes.
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        mkdir -p /opt/airflow/{logs,dags,plugins,config}
+        chown -R "${AIRFLOW_UID:-50000}:0" /opt/airflow/{logs,dags,plugins,config}
+        echo "Airflow version:"
+        /entrypoint airflow version
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_MIGRATE: 'true'
+      _AIRFLOW_WWW_USER_CREATE: 'true'
+      _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME:-airflow}
+      _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD:-airflow}
+    user: "0:0"
+    restart: "no"
+
+  # Handy for one-off commands:
+  #   docker compose run --rm airflow-cli airflow dags list
+  airflow-cli:
+    <<: *airflow-common
+    profiles:
+      - debug
+    environment:
+      <<: *airflow-common-env
+      CONNECTION_CHECK_MAX_COUNT: "0"
+    command:
+      - bash
+      - -c
+      - airflow
 
 volumes:
   postgres-db-volume:

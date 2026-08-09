@@ -43,7 +43,7 @@ machine, not what the code appears to do.
 | Snowflake schema (`sql/schema.sql`) | **Applied to a live account.** All five tables created. |
 | Load to Snowflake (`etl/ingest_to_snowflake.py`) | **Verified against a live account.** 29,178 rows into `RAW_TRANSACTIONS`; replaying the same files inserts 0 and updates 29,178. |
 | Batch scoring to Snowflake (`models/score_batch.py`) | **Verified against a live account.** Reads `RAW_TRANSACTIONS`, writes 29,178 rows to `FRAUD_SCORES`, idempotent on replay. |
-| Airflow DAGs | Airflow 3 syntax. Files compile and the Compose YAML is structurally valid, but **never executed** — Airflow does not run natively on Windows, so this needs WSL or Docker. |
+| Airflow DAGs | Airflow 3 syntax. Files compile and the Compose stack is structurally valid and diffed against the official Airflow 3.0.3 reference, but **never executed**. Procedure to run it: [airflow/RUNBOOK.md](airflow/RUNBOOK.md). |
 | Slack alerting (`models/check_fraud_alerts.py`) | Code exists. Never run. |
 
 ## Model results

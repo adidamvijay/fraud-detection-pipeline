@@ -4,9 +4,10 @@ __pycache__/
 .venv/
 .env
 
-# Airflow
+# Airflow - all runtime state, created by docker compose
 airflow/logs/
-airflow/plugins/__pycache__/
+airflow/config/
+airflow/plugins/
 
 # Data - all of it is generated and reproducible from a seed
 data/outbox/
