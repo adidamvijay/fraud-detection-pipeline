@@ -2,7 +2,7 @@ import os
 import joblib
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -105,6 +105,7 @@ def compute_features(df):
             records.append({
                 "TRANSACTION_ID": row["TRANSACTION_ID"],
                 "USER_ID": user,
+                "EVENT_TIME": ts,
                 "TOTAL_24H": window["AMOUNT"].sum(),
                 "COUNT_24H": len(window),
                 "AVG_24H": window["AMOUNT"].mean() if len(window) > 0 else 0.0,
@@ -141,7 +142,8 @@ def merge_features(txns, fs):
     merged["AVG_24H"] = merged["LAST_24H_AVG_AMOUNT"].fillna(merged["AVG_24H"])
 
     return merged[
-        ["TRANSACTION_ID", "TOTAL_24H", "COUNT_24H", "AVG_24H", "HOURS_SINCE_LAST"]
+        ["TRANSACTION_ID", "USER_ID", "EVENT_TIME",
+         "TOTAL_24H", "COUNT_24H", "AVG_24H", "HOURS_SINCE_LAST"]
     ]
 
 # -----------------------------------------------------
@@ -164,9 +166,14 @@ def score_transactions(feats, clf, version):
     feats["SCORE"] = norm
     feats["FLAGGED"] = feats["SCORE"] >= np.quantile(norm, 0.98)
     feats["MODEL_VERSION"] = version
-    feats["SCORED_AT_RAW"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S.%f")
+    feats["SCORED_AT"] = datetime.now(timezone.utc)
 
-    return feats
+    # TIMESTAMP_NTZ holds UTC; drop the offset at this boundary.
+    for col in ("EVENT_TIME", "SCORED_AT"):
+        feats[col] = pd.to_datetime(feats[col], utc=True).dt.tz_localize(None)
+
+    return feats[["TRANSACTION_ID", "USER_ID", "EVENT_TIME",
+                  "SCORE", "FLAGGED", "MODEL_VERSION", "SCORED_AT"]]
 
 # -----------------------------------------------------
 # STEP 7: WRITE TO STAGING TABLE
@@ -186,23 +193,29 @@ def write_scores(df):
 # STEP 8: MERGE INTO FINAL TABLE
 # -----------------------------------------------------
 def merge_scores():
+    # Idempotency: keyed on TRANSACTION_ID, so re-scoring a window
+    # updates existing rows instead of inserting duplicates.
     sql = """
     MERGE INTO FRAUD_SCORES tgt
     USING FRAUD_SCORES_LOAD src
         ON tgt.TRANSACTION_ID = src.TRANSACTION_ID
     WHEN MATCHED THEN UPDATE SET
+        tgt.USER_ID = src.USER_ID,
+        tgt.EVENT_TIME = src.EVENT_TIME,
         tgt.SCORE = src.SCORE,
         tgt.FLAGGED = src.FLAGGED,
         tgt.MODEL_VERSION = src.MODEL_VERSION,
-        tgt.SCORED_AT = TRY_TO_TIMESTAMP_NTZ(src.SCORED_AT_RAW)
+        tgt.SCORED_AT = src.SCORED_AT
     WHEN NOT MATCHED THEN INSERT (
-        TRANSACTION_ID, SCORE, FLAGGED, MODEL_VERSION, SCORED_AT
+        TRANSACTION_ID, USER_ID, EVENT_TIME, SCORE, FLAGGED, MODEL_VERSION, SCORED_AT
     ) VALUES (
         src.TRANSACTION_ID,
+        src.USER_ID,
+        src.EVENT_TIME,
         src.SCORE,
         src.FLAGGED,
         src.MODEL_VERSION,
-        TRY_TO_TIMESTAMP_NTZ(src.SCORED_AT_RAW)
+        src.SCORED_AT
     );
     """
 

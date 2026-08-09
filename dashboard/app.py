@@ -65,19 +65,22 @@ def query_fraud_scores(start_ts, end_ts, min_score):
     sql = """
         SELECT
             TRANSACTION_ID,
+            USER_ID,
+            EVENT_TIME,
             SCORE,
             FLAGGED,
             MODEL_VERSION,
             SCORED_AT
         FROM FRAUD_SCORES
-        WHERE SCORED_AT BETWEEN %s AND %s
-        ORDER BY SCORED_AT ASC
+        WHERE EVENT_TIME BETWEEN %s AND %s
+        ORDER BY EVENT_TIME ASC
     """
     df = pd.read_sql(sql, conn, params=(start_ts, end_ts))
     if df.empty:
         return df
 
     df["SCORED_AT"] = pd.to_datetime(df["SCORED_AT"], utc=True)
+    df["EVENT_TIME"] = pd.to_datetime(df["EVENT_TIME"], utc=True)
     df = df[df["SCORE"] >= min_score]
     return df
 

@@ -1,13 +1,15 @@
 # models/score_realtime.py
 """
-Real-time scoring script.
+Batch scoring script.
 
-- Loads joblib model from models/artifacts/*.joblib
-- Reads CSVs from data/processed/*.csv (all files)
+- Loads a joblib model from models/artifacts/
+- Reads CSVs from data/processed/
 - Computes windowed features per user consistent with training
-- Scores using IsolationForest (model stored as joblib)
-- Writes scores to Snowflake FRAUD_SCORES_LOAD (via write_pandas) and MERGEs into FRAUD_SCORES
-- Also writes a local data/alerts.csv file for quick inspection
+- Scores using IsolationForest
+- Writes to Snowflake FRAUD_SCORES_LOAD, then MERGEs into FRAUD_SCORES
+- Also writes a local data/alerts.csv for quick inspection
+
+Column names follow sql/schema.sql.
 """
 
 import os
@@ -16,7 +18,7 @@ import json
 import joblib
 import numpy as np
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 from snowflake.connector import connect
 from snowflake.connector.pandas_tools import write_pandas
@@ -143,13 +145,16 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     feats = pd.DataFrame(records)
     return feats
 
+SCORE_COLUMNS = ['TRANSACTION_ID', 'USER_ID', 'EVENT_TIME', 'SCORE',
+                 'FLAGGED', 'MODEL_VERSION', 'SCORED_AT']
+
+
 def score_dataframe(feats: pd.DataFrame, model, model_version=None, threshold_pct=THRESHOLD_PCT):
     """
-    Returns DataFrame with columns:
-      TRANSACTION_ID, SCORE, IS_ANOMALY (bool), MODEL_VERSION, SCORING_TS
+    Returns a DataFrame matching the FRAUD_SCORES schema in sql/schema.sql.
     """
     if feats.empty:
-        return pd.DataFrame(columns=['TRANSACTION_ID','SCORE','IS_ANOMALY','MODEL_VERSION','SCORING_TS'])
+        return pd.DataFrame(columns=SCORE_COLUMNS)
 
     X = feats[['total_amount_24h','txn_count_24h','avg_amount_24h','hours_since_last_txn']].fillna(0)
     raw_scores = -model.decision_function(X)  # higher -> more anomalous
@@ -162,20 +167,23 @@ def score_dataframe(feats: pd.DataFrame, model, model_version=None, threshold_pc
     feats = feats.copy()
     feats['score'] = norm
     cutoff = float(np.quantile(norm, threshold_pct))
-    feats['is_anomaly'] = feats['score'] >= cutoff
+    feats['flagged'] = feats['score'] >= cutoff
 
-    out = feats[['transaction_id','score','is_anomaly']].copy()
+    out = feats[['transaction_id', 'user_id', 'event_time', 'score', 'flagged']].copy()
     out['model_version'] = model_version or "unset"
-    # SCORING_TS as ISO Zulu string to be Snowflake-friendly
-    out['scoring_ts'] = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    out['scored_at'] = datetime.now(timezone.utc)
 
-    # Uppercase columns to match FRAUD_SCORES_LOAD
     out.columns = [c.upper() for c in out.columns]
 
-    # Ensure types
+    # All timestamps are stored as TIMESTAMP_NTZ holding UTC, so strip the
+    # timezone at this boundary rather than letting tz-aware values reach
+    # Snowflake as TIMESTAMP_TZ.
+    for col in ('EVENT_TIME', 'SCORED_AT'):
+        out[col] = pd.to_datetime(out[col], utc=True).dt.tz_localize(None)
+
     out['SCORE'] = out['SCORE'].astype(float)
-    out['IS_ANOMALY'] = out['IS_ANOMALY'].astype(bool)
-    return out
+    out['FLAGGED'] = out['FLAGGED'].astype(bool)
+    return out[SCORE_COLUMNS]
 
 def write_scores_to_snowflake(df_scores: pd.DataFrame):
     if df_scores.empty:
@@ -191,18 +199,24 @@ def write_scores_to_snowflake(df_scores: pd.DataFrame):
         # MERGE into FRAUD_SCORES
         cs = conn.cursor()
         try:
+            # Idempotency: keyed on TRANSACTION_ID, so re-scoring a window
+            # updates existing rows instead of inserting duplicates.
             merge_sql = """
             MERGE INTO FRAUD_SCORES t
             USING FRAUD_SCORES_LOAD s
-            ON t.TXN_ID = s.TXN_ID
+            ON t.TRANSACTION_ID = s.TRANSACTION_ID
             WHEN MATCHED THEN UPDATE SET
-              SCORE = s.SCORE,
-              IS_ANOMALY = s.IS_ANOMALY,
-              MODEL_VERSION = s.MODEL_VERSION,
-              FEATURES = NULL,
-              SCORING_TS = TRY_TO_TIMESTAMP_NTZ(s.SCORING_TS)
-            WHEN NOT MATCHED THEN INSERT (TXN_ID, SCORE, IS_ANOMALY, MODEL_VERSION, FEATURES, SCORING_TS, CREATED_AT)
-              VALUES (s.TXN_ID, s.SCORE, s.IS_ANOMALY, s.MODEL_VERSION, NULL, TRY_TO_TIMESTAMP_NTZ(s.SCORING_TS), CURRENT_TIMESTAMP())
+              t.USER_ID = s.USER_ID,
+              t.EVENT_TIME = s.EVENT_TIME,
+              t.SCORE = s.SCORE,
+              t.FLAGGED = s.FLAGGED,
+              t.MODEL_VERSION = s.MODEL_VERSION,
+              t.SCORED_AT = s.SCORED_AT
+            WHEN NOT MATCHED THEN INSERT (
+              TRANSACTION_ID, USER_ID, EVENT_TIME, SCORE, FLAGGED, MODEL_VERSION, SCORED_AT
+            ) VALUES (
+              s.TRANSACTION_ID, s.USER_ID, s.EVENT_TIME, s.SCORE, s.FLAGGED, s.MODEL_VERSION, s.SCORED_AT
+            )
             """
             cs.execute(merge_sql)
             print("MERGE into FRAUD_SCORES completed.")
@@ -242,7 +256,7 @@ def main():
 
     # write local alerts for convenience
     try:
-        alerts = scored[scored['IS_ANOMALY'] == True].copy()
+        alerts = scored[scored['FLAGGED']].copy()
         if not alerts.empty:
             alerts.to_csv(ALERTS_PATH, index=False)
             print("Wrote local alerts:", ALERTS_PATH, "count:", len(alerts))
