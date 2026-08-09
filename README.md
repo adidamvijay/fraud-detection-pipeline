@@ -1,17 +1,15 @@
 # Fraud Detection Pipeline
 
-> **Status — 9 August 2026. Actively being rebuilt, in the open.**
+> **Status — 9 August 2026. Rebuilt; the warehouse path is verified.**
 > An audit found the components worked individually but were not connected to
 > each other, and that the previous README claimed more than the code did.
-> **Current phase:** the local pipeline runs end to end, the dashboard shows
-> real data, and four models are measured against held-out labels including
-> supervised comparisons — which show the shipped unsupervised model is 4.2x
-> worse than a random forest on the same features, documented rather than
-> buried. Done so far: the audit, one canonical Snowflake schema, a rewritten
-> generator, the local path connected, a real evaluation, the fabricated
-> chart deleted and an evidence-based threshold wired in. Next: the Snowflake
-> and Airflow paths, which have still never been run. This line is updated as
-> each phase completes; the component table below is kept current.
+> **The full path now runs end to end and has been verified against a live
+> Snowflake account on 9 August 2026:** generated CSVs → validation →
+> `RAW_TRANSACTIONS` → features → scoring → `FRAUD_SCORES` → dashboard, with
+> 29,178 rows through every stage and both loaders proven idempotent.
+> Evidence in [docs/verified-snowflake.md](docs/verified-snowflake.md).
+> **Still not run:** the Airflow DAGs and Slack alerting. This line is updated
+> as each phase completes; the component table below is kept current.
 
 A batch pipeline that generates synthetic card transactions, validates them,
 loads them into Snowflake, computes per-user rolling features, scores them with
@@ -41,9 +39,10 @@ machine, not what the code appears to do.
 | Local pipeline (`run_pipeline.py`) | Runs end to end in 10s. |
 | Model evaluation (`models/evaluate.py`) | Runs. Held-out temporal split, four models, per-typology recall, alert-budget table, two trivial baselines. |
 | Tests (`tests/`) | 51 tests covering validation rules, feature causality and the scoring path. All 11 mutations caught by `tests/mutation_check.py`. |
-| Dashboard (`dashboard/app.py`) | Runs. Verified rendering 29,178 transactions with no console or server errors. Falls back to local scores when Snowflake credentials are absent. |
-| Load to Snowflake (`etl/ingest_to_snowflake.py`) | Code exists, still has absolute paths. Never run against a warehouse. |
-| Batch scoring to Snowflake (`models/score_batch.py`) | Column-name bug fixed, still has absolute paths. Never run against a warehouse. |
+| Dashboard (`dashboard/app.py`) | Runs. **Verified reading `FRAUD_SCORES` from Snowflake**, and falls back to local scores when credentials are absent. No console or server errors in either mode. |
+| Snowflake schema (`sql/schema.sql`) | **Applied to a live account.** All five tables created. |
+| Load to Snowflake (`etl/ingest_to_snowflake.py`) | **Verified against a live account.** 29,178 rows into `RAW_TRANSACTIONS`; replaying the same files inserts 0 and updates 29,178. |
+| Batch scoring to Snowflake (`models/score_batch.py`) | **Verified against a live account.** Reads `RAW_TRANSACTIONS`, writes 29,178 rows to `FRAUD_SCORES`, idempotent on replay. |
 | Airflow DAGs | Airflow 3 syntax. Files compile and the Compose YAML is structurally valid, but **never executed** — Airflow does not run natively on Windows, so this needs WSL or Docker. |
 | Slack alerting (`models/check_fraud_alerts.py`) | Code exists. Never run. |
 
@@ -102,9 +101,13 @@ Reproduce with `python models/evaluate.py`.
 - The shipped model catches 0% of card-testing fraud, and is 4.2x worse than
   a random forest on the same features. Both measured; see DESIGN.md
   section 4 for why the unsupervised model ships anyway and what it costs.
-- Three warehouse scripts still carry absolute `/project/...` paths.
 - Neither Airflow DAG has been executed, and `airflow/docker-compose.yaml`
-  has never been started.
+  has never been started. Airflow does not run natively on Windows, so this
+  needs WSL or Docker.
+- `models/check_fraud_alerts.py` (Slack) has never been run.
+- `models/update_feature_store.py` has never been run and nothing reads
+  `FEATURE_STORE`. It is kept as a sketch of what request-time scoring would
+  need, and is deliberately not in the DAG.
 
 ## What runs today
 
@@ -243,30 +246,37 @@ transcript is in [docs/verified-install.md](docs/verified-install.md).
 
 ### Optional: the Snowflake path
 
-Not required for anything above, and **not yet verified against a live
-warehouse**. Install the extra packages together with the base ones so pip
-resolves them in one pass:
+Not required for anything above. **Verified against a live Snowflake account
+on 9 August 2026** — see [docs/verified-snowflake.md](docs/verified-snowflake.md)
+for row counts, table contents and query history captured at the time.
+
+Install the extra packages together with the base ones so pip resolves them
+in one pass:
 
 ```bash
 .venv\Scripts\python.exe -m pip install -r requirements.txt -r requirements-snowflake.txt
 ```
 
-Create the tables once with `sql/schema.sql`, then put credentials in a
-`.env` file in the repository root. It is gitignored and must never be
-committed:
+Copy `.env.example` to `.env` in the repository root and fill it in. `.env` is
+gitignored and must never be committed; `.env.example` documents the keys
+without containing any values.
 
-```
-SNOW_USER=
-SNOW_PWD=
-SNOW_ACCOUNT=
-SNOW_DATABASE=FRAUD_DB
-SNOW_SCHEMA=PUBLIC
-SNOW_WAREHOUSE=COMPUTE_WH
-SNOW_ROLE=
+Then create the tables and run the warehouse path:
+
+```bash
+# in a Snowsight worksheet, or via snowsql:
+#   CREATE DATABASE IF NOT EXISTS FRAUD_DB;
+# then paste sql/schema.sql
+
+.venv\Scripts\python.exe etl\ingest_to_snowflake.py    # data/processed -> RAW_TRANSACTIONS
+.venv\Scripts\python.exe models\score_batch.py         # RAW_TRANSACTIONS -> FRAUD_SCORES
+.venv\Scripts\python.exe -m streamlit run dashboard\app.py
 ```
 
-When those are present the dashboard reads `FRAUD_SCORES` from Snowflake
-instead of the local file.
+Both loaders stage into a transient table and `MERGE` on `TRANSACTION_ID`, so
+re-running a window updates rather than duplicates. When credentials are
+present the dashboard reads `FRAUD_SCORES` from Snowflake instead of the
+local file, and says which source it used.
 
 ## Not built yet
 

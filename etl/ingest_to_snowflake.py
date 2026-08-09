@@ -1,131 +1,166 @@
-# etl/ingest_to_snowflake.py
 """
-CSV -> Snowflake loader. If data/outbox is empty, will also attempt processing
-files that already sit in data/processed (useful if you already ran ingest_local).
+Load normalised CSVs into Snowflake RAW_TRANSACTIONS.
+
+Reads data/processed/, writes RAW_TRANSACTIONS, archives the input.
+
+Two things this used to get wrong
+--------------------------------
+It read data/outbox first and only fell back to data/processed. data/outbox
+holds raw, unvalidated files, so the primary path loaded data that had never
+been through validate_data.py. It now reads data/processed only, which is
+the output of the validate then normalise chain.
+
+It also called write_pandas straight into RAW_TRANSACTIONS, which appends.
+Re-running a file, or an Airflow task retry after a partial failure, would
+duplicate every row. It now writes to a staging table and MERGEs on
+TRANSACTION_ID, so replaying a window updates rather than duplicates.
+
+Paths came from a mix of relative and absolute /project/... literals, which
+resolved to C:\\project on Windows. They now come from config.py.
 """
 
-import os, glob, sys, traceback
+import sys
 from pathlib import Path
+
 import pandas as pd
-from dotenv import load_dotenv
-from snowflake.connector import connect
-from snowflake.connector.pandas_tools import write_pandas
 
-load_dotenv()
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-SNOW_USER = os.getenv("SNOW_USER")
-SNOW_PWD  = os.getenv("SNOW_PWD")
-SNOW_ACCOUNT = os.getenv("SNOW_ACCOUNT")
-SNOW_DATABASE = os.getenv("SNOW_DATABASE", "FRAUD_DB")
-SNOW_SCHEMA = os.getenv("SNOW_SCHEMA", "PUBLIC")
-SNOW_WAREHOUSE = os.getenv("SNOW_WAREHOUSE", "COMPUTE_WH")
-SNOW_ROLE = os.getenv("SNOW_ROLE", None)
+from config import (  # noqa: E402
+    ARCHIVE_DIR, PROCESSED_DIR, TRANSACTION_COLUMNS, ensure_dirs,
+    missing_snowflake_vars, snowflake_args,
+)
 
-OUTBOX_DIR = Path("data/outbox")
-PROCESSED_DIR = Path("/project/data/processed")
-ARCHIVE_DIR = Path("/project/data/outbox/archived")
-PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
-ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+TARGET_TABLE = "RAW_TRANSACTIONS"
+STAGING_TABLE = "RAW_TRANSACTIONS_LOAD"
 
-REQ_COLS = ["transaction_id","user_id","event_time","amount",
-            "merchant_id","merchant_country","txn_type","device_id","ip_address","label"]
+ARCHIVE_PROCESSED_DIR = ARCHIVE_DIR / "processed"
 
-def validate_env():
-    missing = [n for n,v in (("SNOW_USER",SNOW_USER),("SNOW_PWD",SNOW_PWD),("SNOW_ACCOUNT",SNOW_ACCOUNT)) if not v]
-    if missing:
-        raise SystemExit(f"Missing Snowflake env vars: {', '.join(missing)}")
+MERGE_SQL = f"""
+MERGE INTO {TARGET_TABLE} tgt
+USING {STAGING_TABLE} src
+    ON tgt.TRANSACTION_ID = src.TRANSACTION_ID
+WHEN MATCHED THEN UPDATE SET
+    tgt.USER_ID = src.USER_ID,
+    tgt.EVENT_TIME = src.EVENT_TIME,
+    tgt.AMOUNT = src.AMOUNT,
+    tgt.MERCHANT_ID = src.MERCHANT_ID,
+    tgt.MERCHANT_COUNTRY = src.MERCHANT_COUNTRY,
+    tgt.TXN_TYPE = src.TXN_TYPE,
+    tgt.DEVICE_ID = src.DEVICE_ID,
+    tgt.IP_ADDRESS = src.IP_ADDRESS,
+    tgt.LABEL = src.LABEL
+WHEN NOT MATCHED THEN INSERT (
+    TRANSACTION_ID, USER_ID, EVENT_TIME, AMOUNT, MERCHANT_ID,
+    MERCHANT_COUNTRY, TXN_TYPE, DEVICE_ID, IP_ADDRESS, LABEL, LOADED_AT
+) VALUES (
+    src.TRANSACTION_ID, src.USER_ID, src.EVENT_TIME, src.AMOUNT,
+    src.MERCHANT_ID, src.MERCHANT_COUNTRY, src.TXN_TYPE, src.DEVICE_ID,
+    src.IP_ADDRESS, src.LABEL, CURRENT_TIMESTAMP()
+);
+"""
+
 
 def get_conn():
-    conn_args = {
-        "user": SNOW_USER,
-        "password": SNOW_PWD,
-        "account": SNOW_ACCOUNT,
-        "warehouse": SNOW_WAREHOUSE,
-        "database": SNOW_DATABASE,
-        "schema": SNOW_SCHEMA
-    }
-    if SNOW_ROLE:
-        conn_args["role"] = SNOW_ROLE
-    return connect(**conn_args)
+    import snowflake.connector
+    args = snowflake_args()
+    if args is None:
+        raise SystemExit(
+            "Snowflake credentials are not set. Missing: "
+            f"{', '.join(missing_snowflake_vars())}.\n"
+            "Copy .env.example to .env and fill it in.")
+    return snowflake.connector.connect(**args)
 
-def _prepare_df(df: pd.DataFrame) -> pd.DataFrame:
-    for c in REQ_COLS:
-        if c not in df.columns:
-            df[c] = None
-    df['event_time'] = pd.to_datetime(df['event_time'], errors='coerce', utc=True)
-    df['amount'] = pd.to_numeric(df['amount'], errors='coerce').fillna(0.0)
-    df['label'] = pd.to_numeric(df['label'], errors='coerce').fillna(0).astype(int)
-    # trim strings
-    for col in df.select_dtypes(include=['object']).columns:
-        df[col] = df[col].astype(str).str.strip().replace({'None': None, 'nan': None})
+
+def prepare(df):
+    """Coerce to the warehouse schema and uppercase the column names."""
+    for column in TRANSACTION_COLUMNS:
+        if column not in df.columns:
+            df[column] = None
+
+    df = df[TRANSACTION_COLUMNS].copy()
+
+    # TIMESTAMP_NTZ holds UTC; strip any offset at this boundary so the
+    # connector does not send a TIMESTAMP_TZ into an NTZ column.
+    df["event_time"] = pd.to_datetime(df["event_time"], errors="coerce", utc=True)
+    df["event_time"] = df["event_time"].dt.tz_localize(None)
+
+    df["amount"] = pd.to_numeric(df["amount"], errors="coerce").round(2)
+    df["label"] = pd.to_numeric(df["label"], errors="coerce").fillna(0).astype(int)
+
+    for column in ("transaction_id", "user_id", "merchant_id",
+                   "merchant_country", "txn_type", "device_id", "ip_address"):
+        df[column] = df[column].astype(str).str.strip()
+
+    # NOT NULL columns: a row that lost its timestamp or amount in transit
+    # cannot be loaded, and should not silently become zero.
+    before = len(df)
+    df = df.dropna(subset=["event_time", "amount"])
+    if len(df) < before:
+        print(f"  dropped {before - len(df)} rows with a null event_time or amount")
+
     df.columns = [c.upper() for c in df.columns]
     return df
 
-def write_df_to_snowflake(df: pd.DataFrame, table_name="RAW_TRANSACTIONS"):
-    conn = None
+
+def load(conn, df):
+    """Stage, merge, truncate. Returns (staged, rows_after_merge)."""
+    from snowflake.connector.pandas_tools import write_pandas
+
+    cursor = conn.cursor()
     try:
-        conn = get_conn()
-    except Exception as e:
-        raise RuntimeError(f"Snowflake connection failed: {e}")
-    try:
-        success, nchunks, nrows, _ = write_pandas(conn, df, table_name, use_logical_type=True)
-        return success, nchunks, nrows
+        cursor.execute(f"TRUNCATE TABLE IF EXISTS {STAGING_TABLE}")
+
+        success, _, staged, _ = write_pandas(
+            conn, df, STAGING_TABLE, use_logical_type=True)
+        if not success:
+            raise RuntimeError(f"write_pandas into {STAGING_TABLE} failed")
+
+        cursor.execute(MERGE_SQL)
+        merged = cursor.fetchone()
+        cursor.execute(f"TRUNCATE TABLE {STAGING_TABLE}")
+        return staged, merged
     finally:
-        if conn:
-            conn.close()
+        cursor.close()
 
-def process_file(fpath: str, came_from_outbox: bool=True):
-    print("Loading:", fpath)
-    try:
-        df = pd.read_csv(fpath, dtype=str, keep_default_na=False, na_values=[""])
-    except Exception as e:
-        print("Failed to read CSV:", e)
-        return 0
-    df = _prepare_df(df)
-    try:
-        success, nchunks, nrows = write_df_to_snowflake(df)
-        print(f"write_pandas => success={success}, nrows={nrows}, nchunks={nchunks}")
-    except Exception as e:
-        print("Error writing to Snowflake:", e)
-        print(traceback.format_exc())
-        return 0
-
-    # If file came from outbox, move it to processed (atomic)
-    dest = PROCESSED_DIR.joinpath(Path(fpath).name)
-    try:
-        if came_from_outbox and Path(fpath).exists():
-            os.replace(fpath, str(dest))
-            print(f"Moved {fpath} -> {dest} (rows={nrows})")
-        else:
-            print(f"Processed (from processed dir): {fpath} (rows={nrows})")
-    except Exception as e:
-        print("Failed to move file after processing:", e)
-
-    return nrows
 
 def main():
+    ensure_dirs()
+    ARCHIVE_PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+
+    files = sorted(PROCESSED_DIR.glob("*.csv"))
+    if not files:
+        print(f"No files to load in {PROCESSED_DIR}")
+        return 0
+
+    conn = get_conn()
+    total_rows = 0
     try:
-        validate_env()
-    except Exception as e:
-        print("ENV ERROR:", e)
-        sys.exit(2)
+        frames = [pd.read_csv(path) for path in files]
+        combined = pd.concat(frames, ignore_index=True)
+        print(f"read {len(files)} files, {len(combined):,} rows from {PROCESSED_DIR}")
 
-    # Prefer processing outbox first
-    outbox_files = sorted(glob.glob(str(OUTBOX_DIR.joinpath("*.csv"))))
-    if outbox_files:
-        for f in outbox_files:
-            process_file(f, came_from_outbox=True)
-        return
+        prepared = prepare(combined)
+        staged, merged = load(conn, prepared)
+        total_rows = staged
 
-    # If outbox empty, fallback to processed dir (useful if ingest_local already ran)
-    processed_files = sorted(glob.glob(str(PROCESSED_DIR.joinpath("*.csv"))))
-    if processed_files:
-        for f in processed_files:
-            # We won't move these (they are already in processed)
-            process_file(f, came_from_outbox=False)
-        return
+        print(f"staged {staged:,} rows into {STAGING_TABLE}")
+        print(f"MERGE into {TARGET_TABLE}: {merged}")
 
-    print("No files to process in:", OUTBOX_DIR)
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT COUNT(*) FROM {TARGET_TABLE}")
+        print(f"{TARGET_TABLE} now holds {cursor.fetchone()[0]:,} rows")
+        cursor.close()
+
+        # Archive only after the merge has committed.
+        for path in files:
+            path.replace(ARCHIVE_PROCESSED_DIR / path.name)
+        print(f"archived {len(files)} files to {ARCHIVE_PROCESSED_DIR}")
+    finally:
+        conn.close()
+
+    return total_rows
+
 
 if __name__ == "__main__":
     main()

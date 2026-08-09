@@ -47,19 +47,33 @@ Everything above. The local path runs on Windows with no warehouse
 connection, which is deliberate: the model and its evaluation must stay
 reproducible after a Snowflake trial expires.
 
+The warehouse path is also verified. On 9 August 2026 the full chain ran
+against a live Snowflake trial account: `sql/schema.sql` created all five
+tables, `etl/ingest_to_snowflake.py` loaded 29,178 rows into
+`RAW_TRANSACTIONS`, `models/score_batch.py` read them back, computed
+features and wrote 29,178 rows to `FRAUD_SCORES`, and the dashboard rendered
+from `FRAUD_SCORES` rather than the local fallback.
+
+Both loaders were run twice against identical input to demonstrate
+idempotency. The MERGE returns (inserted, updated):
+
+```
+RAW_TRANSACTIONS   first run (29178, 0)   second run (0, 29178)
+FRAUD_SCORES       first run (29178, 0)   second run (0, 29178)
+```
+
+Row counts, table contents and query history captured at the time are in
+`docs/verified-snowflake.md`, so the claim stays checkable after the trial
+account expires.
+
 ### Written but never executed
 
-- `etl/ingest_to_snowflake.py`, `models/score_batch.py`,
-  `models/feature_and_train.py` — the warehouse read and write paths. They
-  compile and their column names now agree with `sql/schema.sql`, but no
-  Snowflake account has been connected.
-- `airflow/dags/*.py` — two DAGs, in Airflow 2 syntax on a 2.9.1 image.
-  Never executed.
-- `airflow/scripts/run_*.py` — five wrappers that import functions which do
-  not exist. Four are dead code the DAGs never call.
+- `airflow/dags/*.py` — two DAGs in Airflow 3 syntax. They compile and the
+  Compose YAML parses, but neither has been run. Airflow does not run
+  natively on Windows, which is the development machine.
 - `models/check_fraud_alerts.py` — Slack alerting.
-- `dashboard/app.py` — runs, but its time-series chart is still fabricated
-  (see limitations).
+- `models/update_feature_store.py` — nothing reads `FEATURE_STORE`; kept as
+  a sketch of what request-time scoring would need.
 
 ### Not built
 
@@ -746,9 +760,16 @@ the result as "transactions per minute". The data now has genuine time
 spread, so the fix is to delete the hack and plot `EVENT_TIME`. Not yet done,
 and it is listed as a known defect in the README rather than quietly left.
 
-**3. Nothing has been run against Snowflake or Airflow.** The warehouse
-scripts compile and their columns agree with the schema, and the DAGs are
-defined, but no part of that path has been executed. Until it has, the
-architecture diagram is a design and the local pipeline is the only thing
-that has been observed working. Verifying it needs a Snowflake account and an
-Airflow instance, and the DAGs need migrating to Airflow 3 syntax first.
+**3. Nothing has been run under Airflow.** The warehouse path is now
+verified end to end against a live Snowflake account, but the orchestration
+around it is not: neither DAG has been executed and the Compose stack has
+never been started. Airflow does not run natively on Windows, so verifying it
+needs WSL or Docker. Until then the schedules, the retry behaviour and the
+task dependencies described in section 5 are a design rather than observed
+behaviour, and the pipeline has only ever been run by invoking the stages
+directly.
+
+A second, smaller gap in the same area: the Snowflake account is a personal
+trial. When it expires the warehouse path stops being demonstrable and only
+`docs/verified-snowflake.md` remains as evidence. The local path was
+deliberately built to keep working without it.

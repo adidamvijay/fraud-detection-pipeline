@@ -1,34 +1,41 @@
 # models/update_feature_store.py
+"""
+Populate FEATURE_STORE with per-user 24-hour aggregates.
 
-import os
+NOT PART OF THE WORKING PIPELINE. Nothing currently reads FEATURE_STORE:
+models/score_batch.py computes features from RAW_TRANSACTIONS directly, and
+this script was removed from the daily DAG because scheduling it would
+schedule work no other task consumes.
+
+It is kept because a per-user aggregate table is what a request-time scoring
+API would need, and this is the sketch of it. It has never been run against a
+live warehouse.
+
+Its feature calculation is also the old nested loop rather than
+models/features.compute_features, so it would need reworking before use.
+"""
+
+import sys
+from datetime import timedelta
+from pathlib import Path
+
 import pandas as pd
-from datetime import datetime, timedelta
-from dotenv import load_dotenv
-import snowflake.connector
-from snowflake.connector.pandas_tools import write_pandas
 
-load_dotenv("/opt/airflow/.env")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-SNOW_USER = os.getenv("SNOW_USER")
-SNOW_PWD = os.getenv("SNOW_PWD")
-SNOW_ACCOUNT = os.getenv("SNOW_ACCOUNT")
-SNOW_DATABASE = os.getenv("SNOW_DATABASE", "FRAUD_DB")
-SNOW_SCHEMA = os.getenv("SNOW_SCHEMA", "PUBLIC")
-SNOW_WAREHOUSE = os.getenv("SNOW_WAREHOUSE", "COMPUTE_WH")
-SNOW_ROLE = os.getenv("SNOW_ROLE", None)
+from config import missing_snowflake_vars, snowflake_args  # noqa: E402
 
 
 def get_conn():
-    """Return a Snowflake connection."""
-    return snowflake.connector.connect(
-        user=SNOW_USER,
-        password=SNOW_PWD,
-        account=SNOW_ACCOUNT,
-        warehouse=SNOW_WAREHOUSE,
-        database=SNOW_DATABASE,
-        schema=SNOW_SCHEMA,
-        role=SNOW_ROLE
-    )
+    """Return a Snowflake connection built from .env via config.py."""
+    import snowflake.connector
+    args = snowflake_args()
+    if args is None:
+        raise SystemExit(
+            "Snowflake credentials are not set. Missing: "
+            f"{', '.join(missing_snowflake_vars())}.\n"
+            "Copy .env.example to .env and fill it in.")
+    return snowflake.connector.connect(**args)
 
 
 def query_recent_transactions():
@@ -97,6 +104,7 @@ def upsert_into_feature_store(df):
     """)
 
     # Upload dataframe into temp table
+    from snowflake.connector.pandas_tools import write_pandas
     success, chunks, rows, _ = write_pandas(conn, df, temp_table)
     print(f"Uploaded {rows} rows into stage table.")
 

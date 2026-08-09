@@ -47,6 +47,24 @@ CREATE TABLE IF NOT EXISTS RAW_TRANSACTIONS (
 -- EVENT_TIME is when the transaction happened. LOADED_AT is when this row
 -- reached the warehouse. Keeping both is what makes backfills auditable.
 
+-- Staging table for the raw load, same shape minus LOADED_AT.
+-- The loader writes here and MERGEs into RAW_TRANSACTIONS on TRANSACTION_ID,
+-- which is what makes re-running a day idempotent. Loading straight into
+-- RAW_TRANSACTIONS with write_pandas would append, so replaying a file would
+-- duplicate every row in it.
+CREATE OR REPLACE TRANSIENT TABLE RAW_TRANSACTIONS_LOAD (
+    TRANSACTION_ID    VARCHAR(36)    NOT NULL,
+    USER_ID           VARCHAR(16)    NOT NULL,
+    EVENT_TIME        TIMESTAMP_NTZ  NOT NULL,
+    AMOUNT            NUMBER(12,2)   NOT NULL,
+    MERCHANT_ID       VARCHAR(64),
+    MERCHANT_COUNTRY  VARCHAR(2),
+    TXN_TYPE          VARCHAR(16),
+    DEVICE_ID         VARCHAR(16),
+    IP_ADDRESS        VARCHAR(45),
+    LABEL             NUMBER(1)      NOT NULL
+);
+
 -- ---------------------------------------------------------------------------
 -- Scored layer
 -- ---------------------------------------------------------------------------

@@ -67,7 +67,16 @@ def load_scores():
                    FLAGGED, MODEL_VERSION, SCORED_AT
             FROM FRAUD_SCORES
         """
-        df = pd.read_sql(sql, get_snowflake_conn())
+        # fetch_pandas_all rather than pd.read_sql: pandas warns that it only
+        # supports SQLAlchemy connectables and sqlite3, and the connector's
+        # own method reads the Arrow result directly instead of going through
+        # a row-by-row DBAPI cursor. models/score_batch.py uses the same call.
+        cursor = get_snowflake_conn().cursor()
+        try:
+            cursor.execute(sql)
+            df = cursor.fetch_pandas_all()
+        finally:
+            cursor.close()
         source = "Snowflake FRAUD_SCORES"
     else:
         path = SCORES_DIR / "scores.csv"
