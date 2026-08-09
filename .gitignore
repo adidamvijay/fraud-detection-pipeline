@@ -15,6 +15,7 @@ data/validated/
 data/bad_records/
 data/archive/
 data/scores/
+data/fraud_ground_truth.csv
 
 # Trained model artifacts are build output, not source
 models/artifacts/

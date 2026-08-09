@@ -3,13 +3,14 @@
 > **Status — 9 August 2026. Actively being rebuilt, in the open.**
 > An audit found the components worked individually but were not connected to
 > each other, and that the previous README claimed more than the code did.
-> **Current phase:** the local pipeline now runs end to end — `python
-> run_pipeline.py` takes generated CSVs through validation, ingestion,
-> training and scoring in 14 seconds. Done so far: the audit, one canonical
-> Snowflake schema, a rewritten generator, and the local path connected.
-> Next: model evaluation with real metrics, then the Snowflake path. This
-> line is updated as each phase completes; the component table below is kept
-> current.
+> **Current phase:** the local pipeline runs end to end and the model is now
+> measured against held-out labels — PR-AUC 0.1719 against 0.1477 for the
+> trivial "sort by amount" baseline, so the model earns its place narrowly.
+> Done so far: the audit, one canonical Snowflake schema, a rewritten
+> generator, the local path connected, and a real evaluation with a
+> before/after comparison in [DESIGN.md](DESIGN.md). Next: the Snowflake
+> path and the fabricated dashboard chart. This line is updated as each phase
+> completes; the component table below is kept current.
 
 A batch pipeline that generates synthetic card transactions, validates them,
 loads them into Snowflake, computes per-user rolling features, scores them with
@@ -36,26 +37,43 @@ machine, not what the code appears to do.
 | Local ingestion (`etl/ingest_local.py`) | Runs. |
 | Feature computation (`models/features.py`) | Runs. Vectorised, 344x faster, verified identical to the old implementation on all four features. |
 | Model training (`models/train_local.py`) | Runs from local CSVs, no warehouse needed. |
-| Local pipeline (`run_pipeline.py`) | Runs end to end in 14s. |
-| Model evaluation | **Not built.** Provisional numbers below are not an evaluation. |
+| Local pipeline (`run_pipeline.py`) | Runs end to end in 10s. |
+| Model evaluation (`models/evaluate.py`) | Runs. Held-out temporal split, PR-AUC, per-typology recall, two trivial baselines. Numbers in [DESIGN.md](DESIGN.md). |
+| Tests (`tests/`) | 11 tests covering feature causality. Verified by mutation. |
 | Load to Snowflake (`etl/ingest_to_snowflake.py`) | Code exists, still has absolute paths. Never run against a warehouse. |
 | Batch scoring to Snowflake (`models/score_batch.py`) | Column-name bug fixed, still has absolute paths. Never run against a warehouse. |
 | Dashboard (`dashboard/app.py`) | Real Streamlit app. **Its time-series chart is still fabricated** — see below. |
 | Airflow DAGs | Defined, never executed. Airflow 2 syntax; migration to Airflow 3 pending. |
 | Slack alerting (`models/check_fraud_alerts.py`) | Code exists. Never run. |
-| Tests | Not built. |
+
+## Model results
+
+Held-out temporal split, 8,897 test rows containing 50 fraud. Full protocol
+and the before/after comparison are in [DESIGN.md](DESIGN.md).
+
+| Ranking | PR-AUC |
+|---|---|
+| random ordering | 0.0054 |
+| absolute features only (the original 4) | 0.0232 |
+| rank by transaction amount, no model | 0.1477 |
+| absolute + user-relative (7 features) | **0.1719** |
+
+Adding three user-relative features took PR-AUC up 7.4x and precision from
+4% to 32% at the same alert volume. The model still only beats sorting by
+amount by 16%, and it catches 0% of card-testing fraud. Both facts are
+documented rather than buried.
 
 ### Known defects not yet fixed
 
 - `dashboard/app.py` spreads all scoring timestamps evenly across 60 seconds
   with `np.linspace` before plotting them, so the "per minute" chart shows a
   shape that is not in the data. To be deleted, not patched.
-- The flagging threshold is still the model's `contamination=0.02`, which is
-  unjustified. It flags 2% of whatever is scored regardless of content.
-- The four features are absolute rather than relative to each user's own
-  baseline, so the model cannot distinguish "large for this user" from
-  "large". Measured consequence: it catches 51% of high-value fraud but only
-  2.5% of card-testing bursts.
+- The model catches 0% of card-testing fraud. Isolation Forest splits on
+  single axes and card testing is a conjunction of moderate deviations. A
+  supervised classifier is the fix; see limitations in DESIGN.md.
+- `models/train_local.py` still flags using `contamination=0.02`. The
+  evidence-based threshold exists in `models/evaluate.py` but has not been
+  wired back into the scoring path.
 - Three warehouse scripts still carry absolute `/project/...` paths.
 - The five wrapper scripts in `airflow/scripts/` import functions that do not
   exist in their target modules and raise `ImportError` on execution.

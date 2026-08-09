@@ -48,9 +48,30 @@ across the full dataset by the benchmark script.
 
 import pandas as pd
 
-FEATURE_COLUMNS = [
+# The original four. Absolute quantities: they describe the transaction and
+# its 24-hour window without reference to what is normal for that user.
+ABSOLUTE_FEATURES = [
     "total_amount_24h", "txn_count_24h", "avg_amount_24h", "hours_since_last_txn",
 ]
+
+# Added after measuring the four above. Each is one of those quantities
+# divided by that user's own trailing baseline, because absolute features
+# cannot distinguish "large for this user" from "large". Measured on the
+# absolute set: 51% recall on high-value takeover but 2.5% on card-testing
+# bursts, and the highest-scoring legitimate rows were simply heavy spenders.
+RELATIVE_FEATURES = [
+    "amount_vs_user_median",   # targets account takeover
+    "count_vs_user_typical",   # targets card-testing bursts
+    "gap_vs_user_typical",     # targets burst velocity
+]
+
+FEATURE_COLUMNS = ABSOLUTE_FEATURES + RELATIVE_FEATURES
+
+# Ratio used when a user has no prior history to compare against. 1.0 means
+# "indistinguishable from this user's baseline", so a user's first
+# transactions are treated as unremarkable rather than anomalous. The
+# alternative would flag every new user by construction.
+NO_BASELINE_RATIO = 1.0
 
 # Value used for a user's first ever transaction, which has no predecessor.
 # Chosen to sit outside the range of any real elapsed time so the model can
@@ -108,4 +129,55 @@ def compute_features(df):
     gap = out.groupby("user_id")["event_time"].diff().dt.total_seconds() / 3600.0
     out["hours_since_last_txn"] = gap.fillna(NO_PREVIOUS_TXN)
 
+    _add_relative_features(out, gap)
+
     return out[["transaction_id", "user_id", "event_time", *FEATURE_COLUMNS]]
+
+
+def _trailing(series, group, how):
+    """
+    That user's baseline from their earlier transactions only.
+
+    shift(1) happens before expanding(), so the current row's own value can
+    never enter its own baseline. This is the whole causality guarantee and
+    it is one call: if the shift is removed, every ratio becomes partly a
+    comparison of a value against itself. tests/test_features.py fails if
+    this property breaks.
+
+    expanding() rather than a fixed window because a user's spending norm is
+    a long-run property; using only the last few transactions would let a
+    fraud burst redefine the baseline it is being measured against.
+    """
+    shifted = series.groupby(group).shift(1)
+    return getattr(shifted.groupby(group).expanding(), how)().reset_index(level=0, drop=True)
+
+
+def _safe_ratio(value, baseline):
+    """Divide, treating an absent or non-positive baseline as 'no baseline'."""
+    usable = baseline.notna() & (baseline > 0)
+    return (value / baseline.where(usable)).fillna(NO_BASELINE_RATIO)
+
+
+def _add_relative_features(out, gap):
+    """
+    Each feature is an absolute quantity over that user's own trailing
+    baseline. Baselines use strictly earlier transactions only.
+    """
+    users = out["user_id"]
+
+    # How large is this amount against what this user normally spends.
+    # Median rather than mean so one prior fraud does not inflate the
+    # baseline and hide the next one.
+    baseline_amount = _trailing(out["amount"], users, "median")
+    out["amount_vs_user_median"] = _safe_ratio(out["amount"], baseline_amount)
+
+    # How busy is this 24-hour window against this user's usual level.
+    baseline_count = _trailing(out["txn_count_24h"].astype(float), users, "mean")
+    out["count_vs_user_typical"] = _safe_ratio(
+        out["txn_count_24h"].astype(float), baseline_count)
+
+    # How fast did this transaction follow the last one, against this user's
+    # usual rhythm. Only defined where a previous transaction exists.
+    baseline_gap = _trailing(gap, users, "median")
+    ratio = _safe_ratio(gap.fillna(0.0), baseline_gap)
+    out["gap_vs_user_typical"] = ratio.where(gap.notna(), NO_BASELINE_RATIO)

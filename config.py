@@ -33,6 +33,12 @@ ARCHIVE_DIR = DATA_DIR / "archive"          # inputs consumed by a completed sta
 
 MODEL_DIR = PROJECT_ROOT / "models" / "artifacts"
 
+# Which fraud typology each injected fraud row belongs to. Evaluation
+# metadata, written by the generator and read only by models/evaluate.py.
+# Deliberately not part of the transaction schema: in a real system no such
+# column would exist, and letting it into the pipeline would invite using it.
+GROUND_TRUTH_PATH = DATA_DIR / "fraud_ground_truth.csv"
+
 # Stage inputs are moved here after that stage succeeds. One subdirectory per
 # stage, so it stays clear which step consumed which file.
 ARCHIVE_OUTBOX_DIR = ARCHIVE_DIR / "outbox"

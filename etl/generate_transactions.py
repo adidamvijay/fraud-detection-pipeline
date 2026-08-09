@@ -50,8 +50,13 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_OUT_DIR = PROJECT_ROOT / "data" / "outbox"
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from config import GROUND_TRUTH_PATH, OUTBOX_DIR  # noqa: E402
+
+DEFAULT_OUT_DIR = OUTBOX_DIR
 
 COLUMNS = [
     "transaction_id", "user_id", "event_time", "amount",
@@ -171,7 +176,7 @@ def generate_legitimate(rng, profiles, start_date, days):
     })
 
 
-def _episode_frame(rng, profiles, user_idx, times, amounts, country_mode):
+def _episode_frame(rng, profiles, user_idx, times, amounts, country_mode, fraud_type):
     """Assemble the rows for one fraud episode."""
     n = len(times)
     idx = np.full(n, user_idx)
@@ -192,6 +197,7 @@ def _episode_frame(rng, profiles, user_idx, times, amounts, country_mode):
         "device_id": rng.choice(DEVICES, size=n),
         "ip_address": make_ips(rng, profiles, idx),
         "label": 1,
+        "fraud_type": fraud_type,
     })
 
 
@@ -228,7 +234,8 @@ def generate_fraud(rng, profiles, start_date, days, n_fraud_rows):
         gaps = np.cumsum(rng.integers(20, 300, size=burst))
         times = start + pd.to_timedelta(gaps, unit="s")
         amounts = rng.uniform(1.0, 15.0, size=burst)
-        episodes.append(_episode_frame(rng, profiles, user_idx, times, amounts, "any"))
+        episodes.append(_episode_frame(rng, profiles, user_idx, times, amounts,
+                                       "any", "card_testing"))
         produced += burst
 
     produced = 0
@@ -243,7 +250,8 @@ def generate_fraud(rng, profiles, start_date, days, n_fraud_rows):
                  + pd.to_timedelta(hours, unit="h")
                  + pd.to_timedelta(rng.integers(0, 3600, size=n), unit="s"))
         amounts = profiles["spend_scale"][user_idx] * rng.uniform(8.0, 25.0, size=n)
-        episodes.append(_episode_frame(rng, profiles, user_idx, times, amounts, "foreign"))
+        episodes.append(_episode_frame(rng, profiles, user_idx, times, amounts,
+                                       "foreign", "account_takeover"))
         produced += n
 
     produced = 0
@@ -256,7 +264,8 @@ def generate_fraud(rng, profiles, start_date, days, n_fraud_rows):
                  + pd.to_timedelta(rng.choice(24, size=n, p=hour_p), unit="h")
                  + pd.to_timedelta(rng.integers(0, 3600, size=n), unit="s"))
         amounts = profiles["spend_scale"][user_idx] * rng.uniform(2.0, 3.5, size=n)
-        episodes.append(_episode_frame(rng, profiles, user_idx, times, amounts, "any"))
+        episodes.append(_episode_frame(rng, profiles, user_idx, times, amounts,
+                                       "any", "subtle"))
         produced += n
 
     return pd.concat(episodes, ignore_index=True)
@@ -347,10 +356,19 @@ def main():
     # seed must give byte-identical files or the tests cannot assert on them.
     df["transaction_id"] = [str(uuid.UUID(bytes=bytes(rng.bytes(16)), version=4))
                             for _ in range(len(df))]
-    df = df.sort_values("event_time").reset_index(drop=True)[COLUMNS]
+    df = df.sort_values("event_time").reset_index(drop=True)
 
     # Episodes can run past the final midnight; keep the window closed.
     df = df[df["event_time"] < pd.Timestamp(end_date) + pd.Timedelta(days=1)]
+
+    # Typology labels go to a separate file, not into the transaction schema.
+    # A real pipeline has no such column, and putting it in the CSV would let
+    # it leak into features by accident.
+    ground_truth = df.loc[df["label"] == 1, ["transaction_id", "fraud_type"]]
+    GROUND_TRUTH_PATH.parent.mkdir(parents=True, exist_ok=True)
+    ground_truth.to_csv(GROUND_TRUTH_PATH, index=False)
+
+    df = df[COLUMNS]
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -364,6 +382,8 @@ def main():
     summarise(df)
     print(f"\nwrote {len(written)} daily files to {out_dir}")
     print(f"  {written[0][0].name} ... {written[-1][0].name}")
+    print(f"wrote fraud typology labels to {GROUND_TRUTH_PATH.name} "
+          f"({len(ground_truth)} rows)")
 
 
 if __name__ == "__main__":
