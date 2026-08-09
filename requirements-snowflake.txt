@@ -1,0 +1,21 @@
+# Extra packages for the Snowflake and Slack paths.
+#
+# Kept separate from requirements.txt on purpose. The local pipeline, the
+# evaluation, the tests and the dashboard all run without these, and
+# snowflake-connector-python pulls in a large dependency tree including
+# pyarrow, cryptography and its own pandas pin. Someone cloning this repo to
+# look at it should not have to install all of that.
+#
+# Install on top of requirements.txt:
+#     pip install -r requirements.txt -r requirements-snowflake.txt
+#
+# Note: the [pandas] extra is what provides write_pandas, which the loader
+# and the scoring job both use. It constrains the pandas version, so install
+# both files together and let pip resolve them rather than installing this
+# one afterwards.
+
+snowflake-connector-python[pandas]>=3.6   # warehouse reads, and write_pandas
+                                          # in etl/ingest_to_snowflake.py and
+                                          # models/score_batch.py
+requests>=2.31                            # Slack webhook POST in
+                                          # models/check_fraud_alerts.py

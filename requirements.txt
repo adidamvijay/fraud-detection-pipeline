@@ -1,8 +1,30 @@
-pandas>=2.0
-numpy>=1.25
-scikit-learn>=1.2
-joblib>=1.3
-snowflake-connector-python>=3.0
-python-dotenv
-flask
-plotly
+# Everything needed to follow the README: run the pipeline, the evaluation,
+# the tests and the dashboard.
+#
+# The Snowflake and Slack packages are in requirements-snowflake.txt instead,
+# because the local path does not need them and they carry a heavier
+# dependency tree. See that file for why they are separated.
+#
+# Lower bounds are the oldest versions the code is known to work with.
+# Versions this was last verified against are noted alongside.
+
+pandas>=2.0            # dataframes throughout; time-based rolling windows in
+                       # models/features.py need the offset-string API
+                       # (verified 3.0.5)
+numpy>=1.25            # seeded Generator API in etl/generate_transactions.py
+                       # and score arrays in models/  (verified 2.4.6)
+scikit-learn>=1.3      # IsolationForest, LogisticRegression, RandomForest,
+                       # precision_recall_curve, average_precision_score,
+                       # TimeSeriesSplit  (verified 1.9.0)
+joblib>=1.3            # serialises the trained model to
+                       # models/artifacts/*.joblib  (verified 1.5.3)
+
+streamlit>=1.49        # dashboard/app.py. Floor is 1.49 because the
+                       # width= argument replaced the now-removed
+                       # use_container_width  (verified 1.61.1)
+plotly>=5.18           # the two dashboard charts  (verified 6.9.0)
+
+python-dotenv>=1.0     # config.load_env reads .env for credentials. Optional
+                       # at runtime - the code degrades gracefully if it is
+                       # missing - but the README tells you to create a .env,
+                       # so it belongs here.  (verified 1.2.1)

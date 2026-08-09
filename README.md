@@ -40,7 +40,7 @@ machine, not what the code appears to do.
 | Model training (`models/train_local.py`) | Runs from local CSVs, no warehouse needed. |
 | Local pipeline (`run_pipeline.py`) | Runs end to end in 10s. |
 | Model evaluation (`models/evaluate.py`) | Runs. Held-out temporal split, four models, per-typology recall, alert-budget table, two trivial baselines. |
-| Tests (`tests/`) | 11 tests covering feature causality. Verified by mutation. |
+| Tests (`tests/`) | 51 tests covering validation rules, feature causality and the scoring path. All 11 mutations caught by `tests/mutation_check.py`. |
 | Dashboard (`dashboard/app.py`) | Runs. Verified rendering 29,178 transactions with no console or server errors. Falls back to local scores when Snowflake credentials are absent. |
 | Load to Snowflake (`etl/ingest_to_snowflake.py`) | Code exists, still has absolute paths. Never run against a warehouse. |
 | Batch scoring to Snowflake (`models/score_batch.py`) | Column-name bug fixed, still has absolute paths. Never run against a warehouse. |
@@ -105,7 +105,6 @@ Reproduce with `python models/evaluate.py`.
 - Three warehouse scripts still carry absolute `/project/...` paths.
 - The five wrapper scripts in `airflow/scripts/` import functions that do not
   exist in their target modules and raise `ImportError` on execution.
-- `requirements.txt` does not match what the code imports.
 
 ## What runs today
 
@@ -210,19 +209,51 @@ sql/          Snowflake DDL
 
 ## Setup
 
-Requires Python 3.11.
+Requires Python 3.11 or later. No database, no Docker, no credentials.
+
+Windows:
 
 ```bash
 python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
+.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-`requirements.txt` is currently wrong — it lists packages the code does not
-import and omits ones it does. Fixing it is a tracked task.
+macOS and Linux:
 
-Snowflake credentials go in a `.env` file in the repository root, which is
-gitignored and must never be committed:
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+```
+
+Then, from the repository root:
+
+```bash
+.venv\Scripts\python.exe run_pipeline.py
+.venv\Scripts\python.exe models\evaluate.py
+.venv\Scripts\python.exe -m unittest discover -s tests
+.venv\Scripts\python.exe -m streamlit run dashboard\app.py
+```
+
+The dashboard opens at http://localhost:8501 and reads
+`data/scores/scores.csv`, which `run_pipeline.py` produces. Nothing above
+touches a network.
+
+This sequence was verified from an empty virtual environment on Windows; the
+transcript is in [docs/verified-install.md](docs/verified-install.md).
+
+### Optional: the Snowflake path
+
+Not required for anything above, and **not yet verified against a live
+warehouse**. Install the extra packages together with the base ones so pip
+resolves them in one pass:
+
+```bash
+.venv\Scripts\python.exe -m pip install -r requirements.txt -r requirements-snowflake.txt
+```
+
+Create the tables once with `sql/schema.sql`, then put credentials in a
+`.env` file in the repository root. It is gitignored and must never be
+committed:
 
 ```
 SNOW_USER=
@@ -234,7 +265,8 @@ SNOW_WAREHOUSE=COMPUTE_WH
 SNOW_ROLE=
 ```
 
-Create the tables once with `sql/schema.sql`.
+When those are present the dashboard reads `FRAUD_SCORES` from Snowflake
+instead of the local file.
 
 ## Not built yet
 

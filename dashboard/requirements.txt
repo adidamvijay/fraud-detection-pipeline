@@ -1,5 +1,20 @@
-streamlit>=1.20
-pandas>=1.5
-plotly>=5.0
-python-dotenv>=0.21
-snowflake-connector-python[pandas]>=3.0
+# Dashboard only.
+#
+# The root requirements.txt already covers everything here. This file exists
+# for deploying dashboard/app.py on its own, where the pipeline packages
+# (scikit-learn, joblib) are not needed because the dashboard reads scores
+# rather than producing them.
+#
+# For local development use the root file instead:
+#     pip install -r requirements.txt
+
+streamlit>=1.49        # the app itself; needs the width= argument
+plotly>=5.18           # volume-over-time and score-distribution charts
+pandas>=2.0            # reading and aggregating the scores table
+python-dotenv>=1.0     # reads .env to decide between Snowflake and the
+                       # local scores file
+
+# Needed only when reading FRAUD_SCORES from Snowflake. The dashboard falls
+# back to data/scores/scores.csv when credentials are absent, and in that
+# mode this line can be dropped.
+snowflake-connector-python[pandas]>=3.6

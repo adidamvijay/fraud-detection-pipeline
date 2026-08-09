@@ -1,4 +1,19 @@
-joblib
-numpy
-pandas
-scikit-learn
+# Installed into the Airflow container on top of the apache/airflow base
+# image, via _PIP_ADDITIONAL_REQUIREMENTS in docker-compose.yaml.
+#
+# Does not list apache-airflow: that comes from the image, and pinning it
+# here would risk fighting the image's own constraints.
+#
+# The DAGs shell out to the project scripts, so the container needs whatever
+# those scripts import. The previous version of this file listed only
+# joblib, numpy, pandas and scikit-learn, so every task that touched the
+# warehouse or Slack would have failed on ImportError inside the container.
+
+pandas>=2.0
+numpy>=1.25
+scikit-learn>=1.3
+joblib>=1.3
+python-dotenv>=1.0
+
+snowflake-connector-python[pandas]>=3.6   # every warehouse task
+requests>=2.31                            # the Slack alerting task

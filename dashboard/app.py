@@ -182,7 +182,7 @@ fig.update_layout(
     legend=dict(orientation="h", yanchor="bottom", y=1.02),
     bargap=0.1,
 )
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig, width="stretch")
 st.caption(f"{label}, plotted on transaction event time. "
            f"{len(buckets)} buckets covering {span_hours:.0f} hours.")
 
@@ -196,7 +196,7 @@ hist = px.histogram(window, x="score", color="flagged", nbins=60,
 hist.update_layout(barmode="overlay", legend=dict(orientation="h",
                                                   yanchor="bottom", y=1.02))
 hist.update_traces(opacity=0.75)
-st.plotly_chart(hist, use_container_width=True)
+st.plotly_chart(hist, width="stretch")
 st.caption(
     "Scores are min-max scaled within a scoring run, so the axis is "
     "comparable inside one run but not across runs.")
@@ -212,7 +212,7 @@ ranked = display.sort_values("score", ascending=False)
 st.dataframe(
     ranked.head(rows)[["transaction_id", "user_id", "event_time", "score",
                        "flagged", "model_version"]],
-    use_container_width=True, hide_index=True)
+    width="stretch", hide_index=True)
 
 st.subheader("Investigate a transaction")
 
